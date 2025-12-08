@@ -179,6 +179,192 @@ def compute_firsts(matches: pl.DataFrame, objectives: pl.DataFrame, players: pl.
     return agg
 
 
+def _fb_map(players: pl.DataFrame) -> Dict[int, Optional[bool]]:
+    fb = (
+        players.filter(pl.col("firstblood_claimed") == 1)
+        .select("match_id", "is_radiant")
+        .group_by("match_id")
+        .agg(pl.first("is_radiant").alias("fb_is_radiant"))
+    )
+    return {int(r["match_id"]): r["fb_is_radiant"] for r in fb.iter_rows(named=True)}
+
+
+def _ft_map(objectives: pl.DataFrame) -> Dict[int, Optional[bool]]:
+    towers = objectives.filter(pl.col("type") == "building_kill").with_columns(
+        pl.when(pl.col("key").str.contains("goodguys")).then(True)
+        .when(pl.col("key").str.contains("badguys")).then(False)
+        .otherwise(None)
+        .alias("building_is_radiant")
+    )
+    first_tower = (
+        towers.sort(["match_id", "time"])
+        .group_by("match_id")
+        .agg(pl.first("building_is_radiant").alias("building_is_radiant"))
+    )
+    return {int(r["match_id"]): r["building_is_radiant"] for r in first_tower.iter_rows(named=True)}
+
+
+def _roshan_maps(objectives: pl.DataFrame) -> Tuple[Dict[int, Optional[str]], Dict[int, Tuple[int, int]]]:
+    """Return (first_roshan_side, steals_rad/dire counts) per match."""
+    obj_groups = objectives.partition_by("match_id", as_dict=True, maintain_order=True)
+    first_rosh_map: Dict[int, Optional[str]] = {}
+    steals_map: Dict[int, Tuple[int, int]] = {}
+    for key, df in obj_groups.items():
+        mid = key[0] if isinstance(key, tuple) else key
+        try:
+            mid = int(mid)
+        except Exception:  # noqa: BLE001
+            continue
+        obj_list = df.to_dicts()
+        rosh_kills = [o for o in obj_list if o.get("type") == "CHAT_MESSAGE_ROSHAN_KILL"]
+        rosh_sides = []
+        for o in rosh_kills:
+            team_val = o.get("team")
+            if team_val == 2:
+                rosh_sides.append("radiant")
+            elif team_val == 3:
+                rosh_sides.append("dire")
+        first_rosh_map[mid] = rosh_sides[0] if rosh_sides else None
+
+        aegis_claims = [o for o in obj_list if o.get("type") == "CHAT_MESSAGE_AEGIS"]
+        steals_rad = steals_dire = 0
+        if rosh_kills and aegis_claims:
+            aeg_iter = iter(sorted(aegis_claims, key=lambda x: x.get("time", 0)))
+            current_aeg = next(aeg_iter, None)
+            for rk in sorted(rosh_kills, key=lambda x: x.get("time", 0)):
+                while current_aeg is not None and current_aeg.get("time", 0) < rk.get("time", 0):
+                    current_aeg = next(aeg_iter, None)
+                if current_aeg is None:
+                    break
+                rk_side = "radiant" if rk.get("team") == 2 else "dire"
+                aeg_side = "radiant" if (current_aeg.get("slot", 10) < 5 or (current_aeg.get("player_slot", 200) < 128)) else "dire"
+                if rk_side != aeg_side:
+                    if aeg_side == "radiant":
+                        steals_rad += 1
+                    else:
+                        steals_dire += 1
+                current_aeg = next(aeg_iter, None)
+        steals_map[mid] = (steals_rad, steals_dire)
+    return first_rosh_map, steals_map
+
+
+def compute_pick_outcomes(
+    matches: pl.DataFrame,
+    objectives: pl.DataFrame,
+    players: pl.DataFrame,
+    raw_map: Dict[int, dict],
+    tracked_ids: List[int],
+) -> pl.DataFrame:
+    """
+    Compute per-team outcomes split by pick order/side.
+    Output rows per team/label: overall, radiant first/last pick, dire first/last pick.
+    """
+    fb_map = _fb_map(players)
+    ft_map = _ft_map(objectives)
+    first_rosh_map, steals_map = _roshan_maps(objectives)
+
+    rows = []
+    for row in matches.iter_rows(named=True):
+        mid = row.get("match_id")
+        rad_id = row.get("radiant_team_id")
+        dire_id = row.get("dire_team_id")
+        radiant_win = row.get("radiant_win")
+        if mid is None or rad_id is None or dire_id is None or radiant_win is None:
+            continue
+        raw = raw_map.get(mid, {})
+        pb = raw.get("picks_bans") or []
+        picks = [x for x in pb if x.get("is_pick")]
+        first_pick_team = last_pick_team = None
+        if picks:
+            first = min(picks, key=lambda x: x.get("order", 0))
+            last = max(picks, key=lambda x: x.get("order", 0))
+            first_pick_team = rad_id if first.get("team") == 0 else dire_id
+            last_pick_team = rad_id if last.get("team") == 0 else dire_id
+
+        fb_is_rad = fb_map.get(mid)
+        ft_building_is_rad = ft_map.get(mid)
+        fr_side = first_rosh_map.get(mid)
+        steals_rad, steals_dire = steals_map.get(mid, (None, None))
+
+        for team_id, team_is_radiant in ((rad_id, True), (dire_id, False)):
+            if team_id not in tracked_ids:
+                continue
+            win = radiant_win if team_is_radiant else (1 - int(radiant_win))
+            fb_hit = fb_is_rad == team_is_radiant if fb_is_rad is not None else None
+            ft_hit = (ft_building_is_rad is not None and ft_building_is_rad != team_is_radiant)
+            ft_hit = ft_hit if ft_building_is_rad is not None else None
+            if fr_side is None:
+                fr_hit = None
+            else:
+                fr_hit = (fr_side == "radiant") == team_is_radiant
+            combo_for = combo_against = None
+            if fb_hit is not None and ft_hit is not None and fr_hit is not None:
+                combo_for = bool(fb_hit and ft_hit and fr_hit and win)
+                combo_against = bool((not fb_hit) and (not ft_hit) and (not fr_hit) and (not win))
+
+            steal_for = None
+            steal_against = None
+            if steals_rad is not None and steals_dire is not None:
+                steal_for = (steals_rad if team_is_radiant else steals_dire) > 0
+                steal_against = (steals_dire if team_is_radiant else steals_rad) > 0
+
+            rows.append(
+                {
+                    "team_id": team_id,
+                    "team_is_radiant": team_is_radiant,
+                    "is_first_pick": first_pick_team == team_id if first_pick_team is not None else None,
+                    "is_last_pick": last_pick_team == team_id if last_pick_team is not None else None,
+                    "win": win,
+                    "first_blood": fb_hit,
+                    "first_tower": ft_hit,
+                    "first_roshan": fr_hit,
+                    "combo_for": combo_for,
+                    "combo_against": combo_against,
+                    "aegis_steal_for": steal_for,
+                    "aegis_steal_against": steal_against,
+                }
+            )
+
+    df = pl.DataFrame(rows, strict=False)
+    out_rows = []
+    labels = [
+        ("overall", None),
+        ("radiant_first_pick", (pl.col("team_is_radiant") & pl.col("is_first_pick"))),
+        ("radiant_last_pick", (pl.col("team_is_radiant") & pl.col("is_last_pick"))),
+        ("dire_first_pick", (~pl.col("team_is_radiant") & pl.col("is_first_pick"))),
+        ("dire_last_pick", (~pl.col("team_is_radiant") & pl.col("is_last_pick"))),
+    ]
+
+    for team_id in tracked_ids:
+        df_team = df.filter(pl.col("team_id") == team_id)
+        if df_team.is_empty():
+            continue
+        for label, mask in labels:
+            sub = df_team if mask is None else df_team.filter(mask)
+            if sub.is_empty():
+                continue
+            out_rows.append(
+                {
+                    "team_id": team_id,
+                    "label": label,
+                    "matches": sub.height,
+                    "winrate": sub["win"].mean(),
+                    "first_blood_rate": sub["first_blood"].mean(),
+                    "first_blood_count": sub["first_blood"].cast(pl.Int64, strict=False).fill_null(0).sum(),
+                    "first_tower_rate": sub["first_tower"].mean(),
+                    "first_tower_count": sub["first_tower"].cast(pl.Int64, strict=False).fill_null(0).sum(),
+                    "first_roshan_rate": sub["first_roshan"].mean(),
+                    "first_roshan_count": sub["first_roshan"].cast(pl.Int64, strict=False).fill_null(0).sum(),
+                    "combo_for_rate": sub["combo_for"].mean(),
+                    "combo_against_rate": sub["combo_against"].mean(),
+                    "aegis_steal_rate": sub["aegis_steal_for"].mean(),
+                    "aegis_steal_against_rate": sub["aegis_steal_against"].mean(),
+                }
+            )
+
+    return pl.DataFrame(out_rows, strict=False)
+
+
 def _objectives_for_match(objectives: pl.DataFrame, match_id: int) -> List[Dict[str, object]]:
     return objectives.filter(pl.col("match_id") == match_id).sort("time").to_dicts()
 
@@ -506,6 +692,7 @@ def main():
     gold_buckets = compute_adv_buckets(matches_raw, raw_map=raw_map, tracked_ids=team_ids, key="radiant_gold_adv", minutes=(5, 10, 12, 15, 20))
     xp_buckets = compute_adv_buckets(matches_raw, raw_map=raw_map, tracked_ids=team_ids, key="radiant_xp_adv", minutes=(5, 10, 12, 15, 20))
     series_maps, series_team_stats = compute_series_maps(matches_raw, tracked_ids=team_ids)
+    pick_outcomes = compute_pick_outcomes(matches_raw, objectives, tables["players"], raw_map=raw_map, tracked_ids=team_ids)
 
     elo_hist.write_parquet(out_dir / "elo_timeseries.parquet")
     elo_latest.write_parquet(out_dir / "elo_latest.parquet")
@@ -516,6 +703,7 @@ def main():
     xp_buckets.write_parquet(out_dir / "xp_buckets.parquet")
     series_maps.write_parquet(out_dir / "series_maps.parquet")
     series_team_stats.write_parquet(out_dir / "series_team_stats.parquet")
+    pick_outcomes.write_parquet(out_dir / "pick_outcomes.parquet")
 
     print("Metrics written:")
     print(f"- Elo history: {out_dir / 'elo_timeseries.parquet'} ({elo_hist.shape})")
@@ -527,6 +715,7 @@ def main():
     print(f"- XP buckets: {out_dir / 'xp_buckets.parquet'} ({xp_buckets.shape})")
     print(f"- Series maps: {out_dir / 'series_maps.parquet'} ({series_maps.shape})")
     print(f"- Series team stats: {out_dir / 'series_team_stats.parquet'} ({series_team_stats.shape})")
+    print(f"- Pick outcomes: {out_dir / 'pick_outcomes.parquet'} ({pick_outcomes.shape})")
 
 
 if __name__ == "__main__":

@@ -60,6 +60,7 @@ def load_metrics(metrics_dir: Path):
         "series_maps": metrics_dir / "series_maps.parquet",
         "series_team": metrics_dir / "series_team_stats.parquet",
         "tracked_teams": metrics_dir / "tracked_teams.parquet",
+        "pick_outcomes": metrics_dir / "pick_outcomes.parquet",
     }
     for key, path in files.items():
         if path.exists():
@@ -119,6 +120,12 @@ def series_stats_for_team(series_team: pl.DataFrame, team_id: int) -> pl.DataFra
     if series_team is None or series_team.is_empty():
         return pl.DataFrame([])
     return series_team.filter(pl.col("team_id") == team_id)
+
+
+def pick_outcomes_for_team(df: pl.DataFrame, team_id: int) -> pl.DataFrame:
+    if df is None or df.is_empty():
+        return pl.DataFrame([])
+    return df.filter(pl.col("team_id") == team_id)
 
 
 def elo_history_for_team(elo_hist: pl.DataFrame, team_id: int) -> pd.DataFrame:
@@ -365,11 +372,13 @@ def team_block(
             )
             winrate = tmp["team_win"].mean()
 
-    # Aggregate firsts
+    # Aggregate firsts (weighted by matches to match pick_outcomes overall)
     if not first_team.is_empty():
-        fb = first_team["first_blood_rate"].mean()
-        ft = first_team["first_tower_rate"].mean()
-        fr = first_team["first_roshan_rate"].mean()
+        total_matches = first_team["matches"].sum()
+        weights = first_team["matches"] / total_matches if total_matches else first_team["matches"]
+        fb = (first_team["first_blood_rate"] * weights).sum()
+        ft = (first_team["first_tower_rate"] * weights).sum()
+        fr = (first_team["first_roshan_rate"] * weights).sum()
         fb_n = first_team["first_blood_count"].sum()
         ft_n = first_team["first_tower_count"].sum()
         fr_n = first_team["first_roshan_count"].sum()
@@ -398,6 +407,52 @@ def team_block(
     if matches_raw is not None and objectives is not None:
         combo = combined_firsts_win(matches_raw, objectives, team_id)
         st.metric("First blood+tower+roshan & win %", f"{combo*100:.3f}%" if combo is not None else "N/A")
+
+    # Pick/side outcomes table
+    pick_df = pick_outcomes_for_team(metrics.get("pick_outcomes"), team_id)
+    st.subheader("Outcomes by side & pick order")
+    if not pick_df.is_empty():
+        label_map = {
+            "overall": "Overall",
+            "radiant_first_pick": "Radiant first pick",
+            "radiant_last_pick": "Radiant last pick",
+            "dire_first_pick": "Dire first pick",
+            "dire_last_pick": "Dire last pick",
+        }
+        order = ["overall", "radiant_first_pick", "radiant_last_pick", "dire_first_pick", "dire_last_pick"]
+        pick_pd = pick_df.to_pandas()
+        pick_pd = pick_pd[pick_pd["label"].isin(order)]
+        pick_pd["label"] = pick_pd["label"].map(label_map)
+
+        def pct(val):
+            return f"{val*100:.3f}%" if pd.notnull(val) else "N/A"
+
+        rows = []
+        for lbl in order:
+            sub = pick_pd[pick_pd["label"] == label_map.get(lbl, lbl)]
+            if sub.empty:
+                continue
+            r = sub.iloc[0]
+            rows.append(
+                {
+                    "Context": r["label"],
+                    "First blood %": pct(r["first_blood_rate"]),
+                    "First tower %": pct(r["first_tower_rate"]),
+                    "First Roshan %": pct(r["first_roshan_rate"]),
+                    "Winrate %": pct(r["winrate"]),
+                    "FB+FT+FR & win %": pct(r["combo_for_rate"]),
+                    "FB+FT+FR against %": pct(r["combo_against_rate"]),
+                    "Aegis steal %": pct(r["aegis_steal_rate"]),
+                    "Aegis stolen %": pct(r["aegis_steal_against_rate"]),
+                    "Games": int(r["matches"]),
+                }
+            )
+        if rows:
+            st.dataframe(pd.DataFrame(rows))
+        else:
+            st.info("No pick/side outcomes for this team.")
+    else:
+        st.info("No pick/side outcomes for this team.")
 
     with st.expander("Firsts by side", expanded=False):
         if not first_team.is_empty():
