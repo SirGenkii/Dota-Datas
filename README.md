@@ -1,27 +1,28 @@
 # Dota Data v2 — Quickstart
 
 ## Prerequisites
-- Python 3.10+ and `venv`
+- Python 3.12.3 and `venv`
 - `make`
 - Optional: Git
 
 ### Windows (PowerShell)
-1) Install Python (3.10+). Ensure `python` is on PATH.
-2) Install Make (e.g., via `choco install make`).
-3) Create venv & install deps:
+1) Install Python 3.12.3 (and ensure `python` is on PATH).
+2) Allow PowerShell scripts (needed to run `Activate.ps1`): `Set-ExecutionPolicy RemoteSigned -Scope CurrentUser`
+3) Install Make (e.g., via `choco install make`).
+4) Create venv & install deps:
    ```powershell
-   python -m venv .venv
+   py -3.12 -m venv .venv
    .\.venv\Scripts\Activate.ps1
-   pip install --upgrade pip
+   python -m pip install --upgrade pip
    pip install -r requirements.txt
    ```
-4) Copy `.env.example` to `.env` (add `OPENDOTA_KEY`).
+5) Copy `.env.example` to `.env` (add `OPENDOTA_KEY`).
 
 ### Linux/macOS
-1) Install Python 3.10+ and make (e.g., `sudo apt install python3 python3-venv make`).
+1) Install Python 3.12.3 and make (e.g., `sudo apt install python3 python3-venv make` then ensure version 3.12.3).
 2) Create venv & install deps:
    ```bash
-   python3 -m venv .venv
+   python3.12 -m venv .venv
    source .venv/bin/activate
    pip install --upgrade pip
    pip install -r requirements.txt

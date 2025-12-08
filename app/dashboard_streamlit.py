@@ -130,6 +130,63 @@ def elo_history_for_team(elo_hist: pl.DataFrame, team_id: int) -> pd.DataFrame:
     return df
 
 
+def combined_firsts_win(matches: pl.DataFrame, objectives: pl.DataFrame, team_id: int) -> Optional[float]:
+    """Rate of matches where team gets first blood + first tower + first Roshan AND wins (common history)."""
+    rel = matches.filter((pl.col("radiant_team_id") == team_id) | (pl.col("dire_team_id") == team_id))
+    if rel.is_empty():
+        return None
+    df = rel.select(
+        "match_id",
+        "radiant_team_id",
+        "dire_team_id",
+        "radiant_win",
+    ).to_pandas()
+    df["team_is_radiant"] = df["radiant_team_id"] == team_id
+    df["team_win"] = df.apply(
+        lambda r: r["radiant_win"] if r["team_is_radiant"] else (1 - int(r["radiant_win"])),
+        axis=1,
+    )
+    obj = objectives.filter(pl.col("match_id").is_in(df["match_id"].tolist())).to_pandas().sort_values("time")
+    flags = []
+    for _, r in df.iterrows():
+        mid = r["match_id"]
+        team_is_rad = r["team_is_radiant"]
+        team_win = r["team_win"]
+        objs = obj[obj["match_id"] == mid]
+        # FB
+        fb_hit = None
+        fb_grp = objs[objs["type"] == "CHAT_MESSAGE_FIRSTBLOOD"]
+        if not fb_grp.empty:
+            fb_row = fb_grp.iloc[0]
+            if pd.notnull(fb_row.get("player_slot")):
+                fb_hit = (fb_row["player_slot"] < 128) == team_is_rad
+            elif pd.notnull(fb_row.get("slot")):
+                fb_hit = (fb_row["slot"] < 5) == team_is_rad
+        # FT
+        ft_hit = None
+        ft_grp = objs[objs["type"] == "building_kill"]
+        if not ft_grp.empty:
+            ft_row = ft_grp.iloc[0]
+            key = str(ft_row.get("key", ""))
+            building_is_rad = True if "goodguys" in key else False if "badguys" in key else None
+            if building_is_rad is not None:
+                ft_hit = (building_is_rad != team_is_rad)
+        # FR
+        fr_hit = None
+        fr_grp = objs[objs["type"] == "CHAT_MESSAGE_ROSHAN_KILL"]
+        if not fr_grp.empty:
+            fr_row = fr_grp.iloc[0]
+            team_val = fr_row.get("team")
+            if team_val in [2, 3]:
+                rosh_rad = team_val == 2
+                fr_hit = (rosh_rad == team_is_rad)
+        if fb_hit is not None and ft_hit is not None and fr_hit is not None:
+            flags.append(fb_hit and ft_hit and fr_hit and bool(team_win))
+    if not flags:
+        return None
+    return float(np.mean(flags))
+
+
 def compute_h2h_metrics(team_a_id: int, team_b_id: int, matches: pl.DataFrame, objectives: pl.DataFrame) -> Optional[dict]:
     pair = matches.filter(
         ((pl.col("radiant_team_id") == team_a_id) & (pl.col("dire_team_id") == team_b_id))
@@ -272,6 +329,8 @@ def team_block(
     metrics: dict,
     logo_url: Optional[str] = None,
     matches_count: Optional[int] = None,
+    matches_raw: Optional[pl.DataFrame] = None,
+    objectives: Optional[pl.DataFrame] = None,
 ):
     suffix = f" ({matches_count} games)" if matches_count is not None else ""
     label = f"{team_name}{suffix}" if team_name else f"{title}{suffix}"
@@ -284,7 +343,7 @@ def team_block(
     else:
         st.subheader(label)
     if team_id is None:
-        st.info("Sélectionnez une équipe.")
+        st.info("Select a team.")
         return
 
     # Top stats: firsts + roshan
@@ -293,6 +352,18 @@ def team_block(
 
     first_team = firsts_for_team(firsts, team_id)
     roshan_team = roshan_for_team(roshan, team_id)
+
+    winrate = None
+    if matches_raw is not None:
+        sub = matches_raw.filter((pl.col("radiant_team_id") == team_id) | (pl.col("dire_team_id") == team_id))
+        if not sub.is_empty():
+            tmp = sub.with_columns(
+                pl.when(pl.col("radiant_team_id") == team_id)
+                .then(pl.col("radiant_win").cast(pl.Float64))
+                .otherwise(1 - pl.col("radiant_win").cast(pl.Float64))
+                .alias("team_win")
+            )
+            winrate = tmp["team_win"].mean()
 
     # Aggregate firsts
     if not first_team.is_empty():
@@ -307,7 +378,8 @@ def team_block(
     ac = roshan_team["aegis_claims_avg"].item() if not roshan_team.is_empty() else None
     steals = roshan_team["steals_total"].item() if not roshan_team.is_empty() else None
 
-    c1, c2, c3 = st.columns(3)
+    c0, c1, c2, c3 = st.columns(4)
+    c0.metric("Winrate", f"{winrate*100:.1f}%" if winrate is not None else "N/A")
     c1.metric("First blood %", f"{fb*100:.1f}%" if fb is not None else "N/A")
     c2.metric("First tower %", f"{ft*100:.1f}%" if ft is not None else "N/A")
     c3.metric("First Roshan %", f"{fr*100:.1f}%" if fr is not None else "N/A")
@@ -315,17 +387,30 @@ def team_block(
     c4.metric("Roshan kills avg", f"{rk:.2f}" if rk is not None else "N/A")
     c5.metric("Aegis claims avg", f"{ac:.2f}" if ac is not None else "N/A")
     steals_rate = roshan_team["steals_rate"].item() if not roshan_team.is_empty() and "steals_rate" in roshan_team.columns else None
-    c6.metric("Aegis steals % (>=1)", f"{steals_rate*100:.1f}%" if steals_rate is not None else "N/A")
+    c6.metric("Aegis steals total", steals if steals is not None else "N/A")
+    if steals_rate is not None:
+        st.caption(f"Aegis steals (>=1 per match): {steals_rate*100:.1f}%")
 
-    with st.expander("Firsts by side (table + chart)", expanded=False):
+    if matches_raw is not None and objectives is not None:
+        combo = combined_firsts_win(matches_raw, objectives, team_id)
+        st.metric("First blood+tower+roshan & win %", f"{combo*100:.1f}%" if combo is not None else "N/A")
+
+    with st.expander("Firsts by side", expanded=False):
         if not first_team.is_empty():
-            df = first_team.to_pandas()
-            st.dataframe(df)
-            # bar chart by side
-            if not df.empty:
-                df_plot = df.copy()
-                df_plot["side"] = df_plot["team_is_radiant"].map({True: "Radiant", False: "Dire"})
-                st.bar_chart(df_plot.set_index("side")[["first_blood_rate", "first_tower_rate", "first_roshan_rate"]])
+            col_rad, col_dire = st.columns(2)
+            for side_bool, label, col in [(True, "Radiant", col_rad), (False, "Dire", col_dire)]:
+                sub = first_team.filter(pl.col("team_is_radiant") == side_bool)
+                if sub.is_empty():
+                    continue
+                row = sub.row(0, named=True)
+                fb_val = f"{row['first_blood_rate']*100:.1f}%" if row["first_blood_rate"] is not None else "N/A"
+                ft_val = f"{row['first_tower_rate']*100:.1f}%" if row["first_tower_rate"] is not None else "N/A"
+                fr_val = f"{row['first_roshan_rate']*100:.1f}%" if row["first_roshan_rate"] is not None else "N/A"
+                with col:
+                    st.markdown(f"**{label}** ({row.get('matches', 'N/A')} games)")
+                    st.metric("First blood %", fb_val)
+                    st.metric("First tower %", ft_val)
+                    st.metric("First Roshan %", fr_val)
         else:
             st.info("No firsts data for this team.")
 
@@ -425,8 +510,8 @@ def main():
     team_names_df = load_team_options(teams_dict, tracked_names, ROOT / TEAMS_CSV_DEFAULT)
     team_options = team_names_df["name"].to_list()
 
-    st.sidebar.header("Filtres")
-    team_a = st.sidebar.selectbox("Équipe A", team_options, index=0 if team_options else None, key="team_a_new")
+    st.sidebar.header("Filters")
+    team_a = st.sidebar.selectbox("Team A", team_options, index=0 if team_options else None, key="team_a_new")
     team_a_row = team_names_df.filter(pl.col("name") == team_a)
     team_a_id = team_a_row["team_id"][0] if team_options else None
     team_a_logo = team_a_row["logo_url"][0] if "logo_url" in team_a_row.columns and team_a_row.height else None
@@ -437,7 +522,7 @@ def main():
     )
 
     team_b_options = ["None"] + team_options
-    team_b = st.sidebar.selectbox("Équipe B", team_b_options, index=0, key="team_b_new")
+    team_b = st.sidebar.selectbox("Team B", team_b_options, index=0, key="team_b_new")
     team_b_id = None
     matches_b = None
     team_b_logo = None
@@ -452,11 +537,29 @@ def main():
         )
 
     if team_b_id is None:
-        team_block(f"{team_a}", team_a_id, team_a, metrics, logo_url=team_a_logo, matches_count=matches_a)
+        team_block(
+            f"{team_a}",
+            team_a_id,
+            team_a,
+            metrics,
+            logo_url=team_a_logo,
+            matches_count=matches_a,
+            matches_raw=matches_raw,
+            objectives=objectives,
+        )
     else:
         col_left, col_right = st.columns([1, 1], gap="small")
         with col_left:
-            team_block(f"{team_a}", team_a_id, team_a, metrics, logo_url=team_a_logo, matches_count=matches_a)
+            team_block(
+                f"{team_a}",
+                team_a_id,
+                team_a,
+                metrics,
+                logo_url=team_a_logo,
+                matches_count=matches_a,
+                matches_raw=matches_raw,
+                objectives=objectives,
+            )
         # Ligne verticale fine entre les colonnes
         st.markdown(
             """
@@ -465,7 +568,16 @@ def main():
             unsafe_allow_html=True,
         )
         with col_right:
-            team_block(f"{team_b}", team_b_id, team_b, metrics, logo_url=team_b_logo, matches_count=matches_b)
+            team_block(
+                f"{team_b}",
+                team_b_id,
+                team_b,
+                metrics,
+                logo_url=team_b_logo,
+                matches_count=matches_b,
+                matches_raw=matches_raw,
+                objectives=objectives,
+            )
 
         # Head-to-head section
         st.header(f"Head-to-head: {team_a} vs {team_b}")
