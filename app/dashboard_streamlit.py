@@ -135,8 +135,10 @@ def team_block(
     team_name: str,
     metrics: dict,
     logo_url: Optional[str] = None,
+    matches_count: Optional[int] = None,
 ):
-    label = f"{team_name}" if team_name else title
+    suffix = f" ({matches_count} games)" if matches_count is not None else ""
+    label = f"{team_name}{suffix}" if team_name else f"{title}{suffix}"
     if logo_url:
         col_logo, col_label = st.columns([1, 5])
         with col_logo:
@@ -273,6 +275,16 @@ def main():
     objectives = tables["objectives"]
 
     teams_dict = build_team_dictionary(matches_raw)
+    # matches count per team
+    matches_counts = (
+        matches_raw.select(
+            pl.concat_list([pl.col("radiant_team_id"), pl.col("dire_team_id")]).alias("team_ids")
+        )
+        .explode("team_ids")
+        .group_by("team_ids")
+        .agg(pl.len().alias("matches"))
+        .rename({"team_ids": "team_id"})
+    )
     tracked_names = metrics.get("tracked_teams")
     team_names_df = load_team_options(teams_dict, tracked_names, ROOT / TEAMS_CSV_DEFAULT)
     team_options = team_names_df["name"].to_list()
@@ -282,22 +294,33 @@ def main():
     team_a_row = team_names_df.filter(pl.col("name") == team_a)
     team_a_id = team_a_row["team_id"][0] if team_options else None
     team_a_logo = team_a_row["logo_url"][0] if "logo_url" in team_a_row.columns and team_a_row.height else None
+    matches_a = (
+        matches_counts.filter(pl.col("team_id") == team_a_id)["matches"][0]
+        if team_a_id is not None and not matches_counts.filter(pl.col("team_id") == team_a_id).is_empty()
+        else None
+    )
 
     team_b_options = ["None"] + team_options
     team_b = st.sidebar.selectbox("Équipe B", team_b_options, index=0, key="team_b_new")
     team_b_id = None
+    matches_b = None
     team_b_logo = None
     if team_b != "None":
         team_b_row = team_names_df.filter(pl.col("name") == team_b)
         team_b_id = team_b_row["team_id"][0]
         team_b_logo = team_b_row["logo_url"][0] if "logo_url" in team_b_row.columns and team_b_row.height else None
+        matches_b = (
+            matches_counts.filter(pl.col("team_id") == team_b_id)["matches"][0]
+            if team_b_id is not None and not matches_counts.filter(pl.col("team_id") == team_b_id).is_empty()
+            else None
+        )
 
     if team_b_id is None:
-        team_block(f"{team_a}", team_a_id, team_a, metrics, logo_url=team_a_logo)
+        team_block(f"{team_a}", team_a_id, team_a, metrics, logo_url=team_a_logo, matches_count=matches_a)
     else:
         col_left, col_right = st.columns([1, 1], gap="small")
         with col_left:
-            team_block(f"{team_a}", team_a_id, team_a, metrics, logo_url=team_a_logo)
+            team_block(f"{team_a}", team_a_id, team_a, metrics, logo_url=team_a_logo, matches_count=matches_a)
         # Ligne verticale fine entre les colonnes
         st.markdown(
             """
@@ -306,7 +329,7 @@ def main():
             unsafe_allow_html=True,
         )
         with col_right:
-            team_block(f"{team_b}", team_b_id, team_b, metrics, logo_url=team_b_logo)
+            team_block(f"{team_b}", team_b_id, team_b, metrics, logo_url=team_b_logo, matches_count=matches_b)
 
 
 if __name__ == "__main__":
