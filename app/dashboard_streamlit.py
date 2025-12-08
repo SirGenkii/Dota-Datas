@@ -370,8 +370,12 @@ def team_block(
         fb = first_team["first_blood_rate"].mean()
         ft = first_team["first_tower_rate"].mean()
         fr = first_team["first_roshan_rate"].mean()
+        fb_n = first_team["first_blood_count"].sum()
+        ft_n = first_team["first_tower_count"].sum()
+        fr_n = first_team["first_roshan_count"].sum()
     else:
         fb = ft = fr = None
+        fb_n = ft_n = fr_n = None
 
     # Roshan aggregates
     rk = roshan_team["roshan_kills_avg"].item() if not roshan_team.is_empty() else None
@@ -379,21 +383,21 @@ def team_block(
     steals = roshan_team["steals_total"].item() if not roshan_team.is_empty() else None
 
     c0, c1, c2, c3 = st.columns(4)
-    c0.metric("Winrate", f"{winrate*100:.1f}%" if winrate is not None else "N/A")
-    c1.metric("First blood %", f"{fb*100:.1f}%" if fb is not None else "N/A")
-    c2.metric("First tower %", f"{ft*100:.1f}%" if ft is not None else "N/A")
-    c3.metric("First Roshan %", f"{fr*100:.1f}%" if fr is not None else "N/A")
+    c0.metric("Winrate", f"{winrate*100:.3f}%" if winrate is not None else "N/A")
+    c1.metric("First blood %", f"{fb*100:.3f}% (count={fb_n})" if fb is not None and fb_n is not None else "N/A")
+    c2.metric("First tower %", f"{ft*100:.3f}% (count={ft_n})" if ft is not None and ft_n is not None else "N/A")
+    c3.metric("First Roshan %", f"{fr*100:.3f}% (count={fr_n})" if fr is not None and fr_n is not None else "N/A")
     c4, c5, c6 = st.columns(3)
     c4.metric("Roshan kills avg", f"{rk:.2f}" if rk is not None else "N/A")
     c5.metric("Aegis claims avg", f"{ac:.2f}" if ac is not None else "N/A")
     steals_rate = roshan_team["steals_rate"].item() if not roshan_team.is_empty() and "steals_rate" in roshan_team.columns else None
     c6.metric("Aegis steals total", steals if steals is not None else "N/A")
     if steals_rate is not None:
-        st.caption(f"Aegis steals (>=1 per match): {steals_rate*100:.1f}%")
+        st.caption(f"Aegis steals (>=1 per match): {steals_rate*100:.3f}%")
 
     if matches_raw is not None and objectives is not None:
         combo = combined_firsts_win(matches_raw, objectives, team_id)
-        st.metric("First blood+tower+roshan & win %", f"{combo*100:.1f}%" if combo is not None else "N/A")
+        st.metric("First blood+tower+roshan & win %", f"{combo*100:.3f}%" if combo is not None else "N/A")
 
     with st.expander("Firsts by side", expanded=False):
         if not first_team.is_empty():
@@ -403,9 +407,18 @@ def team_block(
                 if sub.is_empty():
                     continue
                 row = sub.row(0, named=True)
-                fb_val = f"{row['first_blood_rate']*100:.1f}%" if row["first_blood_rate"] is not None else "N/A"
-                ft_val = f"{row['first_tower_rate']*100:.1f}%" if row["first_tower_rate"] is not None else "N/A"
-                fr_val = f"{row['first_roshan_rate']*100:.1f}%" if row["first_roshan_rate"] is not None else "N/A"
+                fb_n = row.get("first_blood_count", None)
+                ft_n = row.get("first_tower_count", None)
+                fr_n = row.get("first_roshan_count", None)
+                fb_val = (
+                    f"{row['first_blood_rate']*100:.3f}% (count={fb_n})" if row["first_blood_rate"] is not None else "N/A"
+                )
+                ft_val = (
+                    f"{row['first_tower_rate']*100:.3f}% (count={ft_n})" if row["first_tower_rate"] is not None else "N/A"
+                )
+                fr_val = (
+                    f"{row['first_roshan_rate']*100:.3f}% (count={fr_n})" if row["first_roshan_rate"] is not None else "N/A"
+                )
                 with col:
                     st.markdown(f"**{label}** ({row.get('matches', 'N/A')} games)")
                     st.metric("First blood %", fb_val)
@@ -592,10 +605,10 @@ def main():
                 (colB, team_b, h2h["team_b"]),
             ]:
                 with col:
-                    col.metric("Winrate", f"{data.get('winrate', 0)*100:.1f}%" if data.get("winrate") is not None else "N/A")
-                    col.metric("First blood %", f"{data.get('first_blood', 0)*100:.1f}%" if data.get("first_blood") is not None else "N/A")
-                    col.metric("First tower %", f"{data.get('first_tower', 0)*100:.1f}%" if data.get("first_tower") is not None else "N/A")
-                    col.metric("First Roshan %", f"{data.get('first_roshan', 0)*100:.1f}%" if data.get("first_roshan") is not None else "N/A")
+                    col.metric("Winrate", f"{data.get('winrate', 0)*100:.3f}%" if data.get("winrate") is not None else "N/A")
+                    col.metric("First blood %", f"{data.get('first_blood', 0)*100:.3f}%" if data.get("first_blood") is not None else "N/A")
+                    col.metric("First tower %", f"{data.get('first_tower', 0)*100:.3f}%" if data.get("first_tower") is not None else "N/A")
+                    col.metric("First Roshan %", f"{data.get('first_roshan', 0)*100:.3f}%" if data.get("first_roshan") is not None else "N/A")
                     col.metric("Roshan kills avg", f"{data.get('roshan_kills_avg', 0):.2f}" if data.get("roshan_kills_avg") is not None else "N/A")
 
             # By side table
@@ -621,10 +634,10 @@ def main():
                         )
                 if rows:
                     df_side = pd.DataFrame(rows)
-                    df_side["winrate"] = (df_side["winrate"] * 100).round(1)
-                    df_side["first_blood"] = (df_side["first_blood"] * 100).round(1)
-                    df_side["first_tower"] = (df_side["first_tower"] * 100).round(1)
-                    df_side["first_roshan"] = (df_side["first_roshan"] * 100).round(1)
+                    df_side["winrate"] = df_side["winrate"] * 100
+                    df_side["first_blood"] = df_side["first_blood"] * 100
+                    df_side["first_tower"] = df_side["first_tower"] * 100
+                    df_side["first_roshan"] = df_side["first_roshan"] * 100
                     st.dataframe(df_side)
                 else:
                     st.info("No side-level data for this matchup.")

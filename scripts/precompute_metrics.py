@@ -87,11 +87,20 @@ def compute_elo(matches: pl.DataFrame, team_ids: List[int], k: float = 24.0, bas
     return hist_df, latest_df
 
 
-def compute_firsts(matches: pl.DataFrame, objectives: pl.DataFrame, tracked_ids: List[int]) -> pl.DataFrame:
-    """Compute first blood / first tower / first roshan rates per tracked team."""
-    # first blood from objectives type CHAT_MESSAGE_FIRSTBLOOD
-    fb = objectives.filter(pl.col("type") == "CHAT_MESSAGE_FIRSTBLOOD").select("match_id", "slot", "player_slot")
-    fb = fb.with_columns((pl.col("player_slot") < 128).alias("is_radiant"))
+def compute_firsts(matches: pl.DataFrame, objectives: pl.DataFrame, players: pl.DataFrame, tracked_ids: List[int]) -> pl.DataFrame:
+    """
+    Compute first blood / first tower / first roshan rates per tracked team.
+    - First blood from players.firstblood_claimed (more reliable than objectives).
+    - First tower from earliest building_kill.
+    - First Roshan from first CHAT_MESSAGE_ROSHAN_KILL (team 2=radiant, 3=dire).
+    """
+    # first blood: players table
+    fb = (
+        players.filter(pl.col("firstblood_claimed") == 1)
+        .select("match_id", "is_radiant")
+        .group_by("match_id")
+        .agg(pl.first("is_radiant").alias("fb_is_radiant"))
+    )
 
     # first tower: building_kill earliest per match
     towers = objectives.filter(pl.col("type") == "building_kill").with_columns(
@@ -119,9 +128,7 @@ def compute_firsts(matches: pl.DataFrame, objectives: pl.DataFrame, tracked_ids:
         "radiant_team_id",
         "dire_team_id",
         "radiant_win",
-    )
-
-    m = m.join(fb, on="match_id", how="left").join(first_tower, on="match_id", how="left").join(rosh, on="match_id", how="left")
+    ).join(fb, on="match_id", how="left").join(first_tower, on="match_id", how="left").join(rosh, on="match_id", how="left")
 
     rows = []
     for side in ("radiant", "dire"):
@@ -138,10 +145,10 @@ def compute_firsts(matches: pl.DataFrame, objectives: pl.DataFrame, tracked_ids:
         )
         for r in team_rows.iter_rows(named=True):
             team_id = r["team_id"]
-            fb_hit = r["is_radiant"] if r["is_radiant"] is not None else None
+            fb_hit = r["fb_is_radiant"] == side_bool if r.get("fb_is_radiant") is not None else None
             ft_hit = None
             if r.get("building_is_radiant") is not None:
-                ft_hit = r["building_is_radiant"] != side_bool  # if tower owned by same side? invert
+                ft_hit = r["building_is_radiant"] != side_bool  # first tower belonged to opponent
             fr_hit = None
             if r.get("roshan_team") is not None:
                 # roshan_team 2 ~ Radiant, 3 ~ Dire
@@ -162,6 +169,9 @@ def compute_firsts(matches: pl.DataFrame, objectives: pl.DataFrame, tracked_ids:
             pl.col("first_blood").mean().alias("first_blood_rate"),
             pl.col("first_tower").mean().alias("first_tower_rate"),
             pl.col("first_roshan").mean().alias("first_roshan_rate"),
+            pl.sum("first_blood").alias("first_blood_count"),
+            pl.sum("first_tower").alias("first_tower_count"),
+            pl.sum("first_roshan").alias("first_roshan_count"),
             pl.len().alias("matches"),
         )
         .sort(["team_id", "team_is_radiant"])
@@ -491,7 +501,7 @@ def main():
         base_elo=args.base_elo,
         side_adv=args.side_adv,
     )
-    firsts = compute_firsts(matches_raw, objectives, tracked_ids=team_ids)
+    firsts = compute_firsts(matches_raw, objectives, tables["players"], tracked_ids=team_ids)
     roshan = compute_roshan_metrics(matches_raw, objectives, tracked_ids=team_ids)
     gold_buckets = compute_adv_buckets(matches_raw, raw_map=raw_map, tracked_ids=team_ids, key="radiant_gold_adv", minutes=(5, 10, 12, 15, 20))
     xp_buckets = compute_adv_buckets(matches_raw, raw_map=raw_map, tracked_ids=team_ids, key="radiant_xp_adv", minutes=(5, 10, 12, 15, 20))
