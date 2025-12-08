@@ -9,6 +9,7 @@ from typing import Optional, Tuple
 import pandas as pd
 import polars as pl
 import streamlit as st
+import numpy as np
 
 
 def _find_root() -> Path:
@@ -127,6 +128,141 @@ def elo_history_for_team(elo_hist: pl.DataFrame, team_id: int) -> pd.DataFrame:
     if not df.empty:
         df["start_dt"] = pd.to_datetime(df["start_time"], unit="s")
     return df
+
+
+def compute_h2h_metrics(team_a_id: int, team_b_id: int, matches: pl.DataFrame, objectives: pl.DataFrame) -> Optional[dict]:
+    pair = matches.filter(
+        ((pl.col("radiant_team_id") == team_a_id) & (pl.col("dire_team_id") == team_b_id))
+        | ((pl.col("radiant_team_id") == team_b_id) & (pl.col("dire_team_id") == team_a_id))
+    )
+    if pair.is_empty():
+        return None
+    # Select only needed columns to avoid pyarrow dtype issues
+    pair_pd = pair.select(
+        "match_id",
+        "radiant_team_id",
+        "dire_team_id",
+        "radiant_win",
+        "start_time",
+    ).to_pandas()
+    match_ids = pair_pd["match_id"].tolist()
+    obj = objectives.filter(pl.col("match_id").is_in(match_ids)).to_pandas().sort_values("time")
+
+    def side_bool(is_radiant: bool, team_id: int, match_row: dict) -> Optional[bool]:
+        if is_radiant:
+            return match_row["radiant_team_id"] == team_id
+        return match_row["dire_team_id"] == team_id
+
+    def per_team_metrics(team_id: int):
+        df = pair_pd.copy()
+        df["team_is_radiant"] = df["radiant_team_id"] == team_id
+        df["team_win"] = df.apply(
+            lambda r: r["radiant_win"] if r["team_is_radiant"] else (1 - int(r["radiant_win"])),
+            axis=1,
+        )
+        if df.empty:
+            return {}
+        team_is_rad_map = dict(zip(df["match_id"], df["team_is_radiant"]))
+
+        # Precompute per-match stats
+        stats = []
+        fb_all = obj[obj["type"] == "CHAT_MESSAGE_FIRSTBLOOD"]
+        towers = obj[obj["type"] == "building_kill"]
+        rosh = obj[obj["type"] == "CHAT_MESSAGE_ROSHAN_KILL"]
+        for _, r in df.iterrows():
+            mid = r["match_id"]
+            team_is_rad = r["team_is_radiant"]
+            win = r["team_win"]
+
+            # first blood
+            fb_hit = None
+            grp = fb_all[fb_all["match_id"] == mid]
+            if not grp.empty:
+                row_fb = grp.iloc[0]
+                if pd.notnull(row_fb.get("player_slot")):
+                    fb_hit = (row_fb["player_slot"] < 128) == team_is_rad
+                elif pd.notnull(row_fb.get("slot")):
+                    fb_hit = (row_fb["slot"] < 5) == team_is_rad
+
+            # first tower
+            ft_hit = None
+            grp = towers[towers["match_id"] == mid]
+            if not grp.empty:
+                row_ft = grp.iloc[0]
+                key = str(row_ft.get("key", ""))
+                if "goodguys" in key:
+                    building_is_rad = True
+                elif "badguys" in key:
+                    building_is_rad = False
+                else:
+                    building_is_rad = None
+                if building_is_rad is not None:
+                    ft_hit = (building_is_rad != team_is_rad)
+
+            # first roshan
+            fr_hit = None
+            grp = rosh[rosh["match_id"] == mid]
+            if not grp.empty:
+                row_rosh = grp.iloc[0]
+                team_val = row_rosh.get("team")
+                if team_val in [2, 3]:
+                    rosh_rad = team_val == 2
+                    fr_hit = (rosh_rad == team_is_rad)
+
+            # roshan kills count for team
+            rk_count = 0
+            if not grp.empty:
+                for _, row_rk in grp.iterrows():
+                    team_val = row_rk.get("team")
+                    if team_val in [2, 3]:
+                        rk_is_rad = team_val == 2
+                        if rk_is_rad == team_is_rad:
+                            rk_count += 1
+
+            stats.append(
+                {
+                    "team_is_radiant": team_is_rad,
+                    "win": win,
+                    "first_blood": fb_hit,
+                    "first_tower": ft_hit,
+                    "first_roshan": fr_hit,
+                    "roshan_kills": rk_count,
+                }
+            )
+
+        if not stats:
+            return {}
+        df_stats = pd.DataFrame(stats)
+        overall = {
+            "winrate": df_stats["win"].mean(),
+            "first_blood": df_stats["first_blood"].mean() if df_stats["first_blood"].notna().any() else None,
+            "first_tower": df_stats["first_tower"].mean() if df_stats["first_tower"].notna().any() else None,
+            "first_roshan": df_stats["first_roshan"].mean() if df_stats["first_roshan"].notna().any() else None,
+            "roshan_kills_avg": df_stats["roshan_kills"].mean(),
+        }
+        by_side = {}
+        for side_bool, label in [(True, "Radiant"), (False, "Dire")]:
+            sub = df_stats[df_stats["team_is_radiant"] == side_bool]
+            if sub.empty:
+                by_side[label] = None
+                continue
+            by_side[label] = {
+                "matches": len(sub),
+                "winrate": sub["win"].mean(),
+                "first_blood": sub["first_blood"].mean() if sub["first_blood"].notna().any() else None,
+                "first_tower": sub["first_tower"].mean() if sub["first_tower"].notna().any() else None,
+                "first_roshan": sub["first_roshan"].mean() if sub["first_roshan"].notna().any() else None,
+                "roshan_kills_avg": sub["roshan_kills"].mean(),
+            }
+
+        overall["by_side"] = by_side
+        return overall
+
+    return {
+        "matches": len(match_ids),
+        "team_a": per_team_metrics(team_a_id),
+        "team_b": per_team_metrics(team_b_id),
+    }
 
 
 def team_block(
@@ -330,6 +466,56 @@ def main():
         )
         with col_right:
             team_block(f"{team_b}", team_b_id, team_b, metrics, logo_url=team_b_logo, matches_count=matches_b)
+
+        # Head-to-head section
+        st.header(f"Head-to-head: {team_a} vs {team_b}")
+        h2h = compute_h2h_metrics(team_a_id, team_b_id, matches_raw, objectives)
+        if h2h is None:
+            st.info("No head-to-head games between these teams in the dataset.")
+        else:
+            st.metric("Matches", h2h["matches"])
+            colA, colB = st.columns(2)
+            for col, label, data in [
+                (colA, team_a, h2h["team_a"]),
+                (colB, team_b, h2h["team_b"]),
+            ]:
+                with col:
+                    col.metric("Winrate", f"{data.get('winrate', 0)*100:.1f}%" if data.get("winrate") is not None else "N/A")
+                    col.metric("First blood %", f"{data.get('first_blood', 0)*100:.1f}%" if data.get("first_blood") is not None else "N/A")
+                    col.metric("First tower %", f"{data.get('first_tower', 0)*100:.1f}%" if data.get("first_tower") is not None else "N/A")
+                    col.metric("First Roshan %", f"{data.get('first_roshan', 0)*100:.1f}%" if data.get("first_roshan") is not None else "N/A")
+                    col.metric("Roshan kills avg", f"{data.get('roshan_kills_avg', 0):.2f}" if data.get("roshan_kills_avg") is not None else "N/A")
+
+            # By side table
+            with st.expander("H2H by side (A vs B)", expanded=False):
+                rows = []
+                for label, data in [(team_a, h2h["team_a"]), (team_b, h2h["team_b"])]:
+                    by_side = data.get("by_side") or {}
+                    for side_label in ["Radiant", "Dire"]:
+                        side_data = by_side.get(side_label)
+                        if side_data is None:
+                            continue
+                        rows.append(
+                            {
+                                "team": label,
+                                "side": side_label,
+                                "matches": side_data["matches"],
+                                "winrate": side_data["winrate"],
+                                "first_blood": side_data["first_blood"],
+                                "first_tower": side_data["first_tower"],
+                                "first_roshan": side_data["first_roshan"],
+                                "roshan_kills_avg": side_data["roshan_kills_avg"],
+                            }
+                        )
+                if rows:
+                    df_side = pd.DataFrame(rows)
+                    df_side["winrate"] = (df_side["winrate"] * 100).round(1)
+                    df_side["first_blood"] = (df_side["first_blood"] * 100).round(1)
+                    df_side["first_tower"] = (df_side["first_tower"] * 100).round(1)
+                    df_side["first_roshan"] = (df_side["first_roshan"] * 100).round(1)
+                    st.dataframe(df_side)
+                else:
+                    st.info("No side-level data for this matchup.")
 
 
 if __name__ == "__main__":
