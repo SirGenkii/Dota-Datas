@@ -46,6 +46,7 @@ from src.dota_data import (  # noqa: E402
 
 RAW_PATH_DEFAULT = Path("data/raw/data.json")
 PROCESSED_DIR_DEFAULT = Path("data/processed")
+METRICS_DIR_DEFAULT = Path("data/metrics")
 
 
 @st.cache_data(show_spinner=False)
@@ -61,6 +62,26 @@ def load_tables(raw_path: Path, processed_dir: Path):
 def load_raw_map(raw_path: Path):
     data = json.loads(raw_path.read_text())
     return {item["json"]["match_id"]: item["json"] for item in data}
+
+
+@st.cache_data(show_spinner=False)
+def load_metrics(metrics_dir: Path):
+    """Load precomputed metrics if available."""
+    metrics = {}
+    files = {
+        "elo_hist": metrics_dir / "elo_timeseries.parquet",
+        "elo_latest": metrics_dir / "elo_latest.parquet",
+        "firsts": metrics_dir / "firsts.parquet",
+        "roshan": metrics_dir / "roshan.parquet",
+        "gold_xp": metrics_dir / "gold_xp_buckets.parquet",
+        "series_maps": metrics_dir / "series_maps.parquet",
+        "series_team": metrics_dir / "series_team_stats.parquet",
+        "tracked_teams": metrics_dir / "tracked_teams.parquet",
+    }
+    for key, path in files.items():
+        if path.exists():
+            metrics[key] = pl.read_parquet(path)
+    return metrics
 
 
 def first_blood_rate(players: pl.DataFrame) -> float:
@@ -112,8 +133,10 @@ def main():
     raw_path = next((p for p in raw_candidates if p.exists()), RAW_PATH_DEFAULT)
     processed_dir = raw_path.parent.parent / "processed"
 
+    metrics_dir = root / METRICS_DIR_DEFAULT
     tables = load_tables(raw_path, processed_dir)
     raw_map = load_raw_map(raw_path)
+    metrics = load_metrics(metrics_dir)
 
     matches_raw = tables["matches"]
     matches = match_header(matches_raw)
@@ -121,6 +144,9 @@ def main():
     objectives = tables["objectives"]
 
     teams_dict = build_team_dictionary(matches_raw)
+    tracked_names = None
+    if "tracked_teams" in metrics:
+        tracked_names = metrics["tracked_teams"]
     players_dict = build_player_dictionary(players)
     hero_counts = build_hero_counts(players)
     try:
@@ -129,7 +155,21 @@ def main():
         heroes_dict = None
 
     # Sidebar: team A and optional team B (H2H)
-    team_names = teams_dict.select(["team_id", "name"]).drop_nulls().sort("name")
+    # Restreindre les équipes aux 24 référencées dans data/teams_to_look.csv si dispo
+    teams_csv = Path(ROOT) / "data/teams_to_look.csv"
+    if tracked_names is not None and not tracked_names.is_empty():
+        team_names = tracked_names.select(pl.col("team_id").alias("team_id"), pl.col("name")).drop_nulls().sort("name")
+    elif teams_csv.exists():
+        lookup = pl.read_csv(teams_csv)
+        lookup_ids = lookup["TeamID"].to_list()
+        team_names = (
+            teams_dict.select(["team_id", "name"])
+            .drop_nulls()
+            .filter(pl.col("team_id").is_in(lookup_ids))
+            .sort("name")
+        )
+    else:
+        team_names = teams_dict.select(["team_id", "name"]).drop_nulls().sort("name")
     team_options = team_names["name"].to_list()
 
     # Precompute H2H pairs for filtering
@@ -331,6 +371,78 @@ def main():
         st.dataframe(h2h_matches.sort("start_time", descending=True).to_pandas())
     else:
         st.info("Select Team B to see head-to-head.")
+
+    # Pré-calculs metrics (Roshan/Aegis, firsts, gold/xp buckets, séries, Elo)
+    st.header("Pré-calculs v2 (team A)")
+    if metrics:
+        team_names_df = team_names.rename({"name": "team_name"})
+        tabs = st.tabs(["Roshan/Aegis", "Firsts", "Gold/XP buckets", "Series", "Elo"])
+
+        with tabs[0]:
+            if "roshan" in metrics:
+                rosh = metrics["roshan"].join(team_names_df, on="team_id", how="left")
+                st.subheader("Roshan/Aegis global (tracked teams)")
+                st.dataframe(rosh.sort("roshan_kills_avg", descending=True).to_pandas())
+                team_rosh = rosh.filter(pl.col("team_id") == team_a_id)
+                st.subheader(f"Team {team_a} Roshan/Aegis")
+                st.dataframe(team_rosh.to_pandas())
+                if "firsts" in metrics:
+                    firsts_team = metrics["firsts"].filter(pl.col("team_id") == team_a_id)
+                    st.write("First roshan rate par side (from firsts):")
+                    st.dataframe(firsts_team.select(["team_is_radiant", "first_roshan_rate", "matches"]).to_pandas())
+            else:
+                st.info("Roshan metrics manquants (lance `make precompute`).")
+
+        with tabs[1]:
+            if "firsts" in metrics:
+                firsts_all = metrics["firsts"].join(team_names_df, on="team_id", how="left")
+                st.subheader("Firsts (first blood/tower/roshan) par équipe/côté")
+                st.dataframe(firsts_all.to_pandas())
+                team_firsts = firsts_all.filter(pl.col("team_id") == team_a_id)
+                st.subheader(f"Team {team_a} (split Radiant/Dire)")
+                st.dataframe(team_firsts.to_pandas())
+            else:
+                st.info("Firsts metrics manquants.")
+
+        with tabs[2]:
+            if "gold_xp" in metrics:
+                gx = metrics["gold_xp"]
+                minutes = sorted(gx["minute"].unique())
+                min_choice = st.select_slider("Minute", options=minutes, value=minutes[0] if minutes else 10)
+                gx_team = gx.filter((pl.col("team_id") == team_a_id) & (pl.col("minute") == min_choice))
+                st.subheader(f"Gold buckets (min {min_choice}) — {team_a}")
+                st.dataframe(gx_team.to_pandas())
+                if not gx_team.is_empty():
+                    st.bar_chart(gx_team.select(["bucket_gold", "winrate"]).to_pandas(), x="bucket_gold", y="winrate")
+            else:
+                st.info("Gold/XP metrics manquants.")
+
+        with tabs[3]:
+            if "series_team" in metrics:
+                series_team = metrics["series_team"].join(team_names_df, on="team_id", how="left")
+                st.subheader(f"Winrate par map_num — {team_a}")
+                st.dataframe(series_team.filter(pl.col("team_id") == team_a_id).to_pandas())
+                st.subheader("Distribution globale")
+                st.dataframe(series_team.to_pandas())
+            else:
+                st.info("Séries metrics manquants.")
+
+        with tabs[4]:
+            if "elo_latest" in metrics and "elo_hist" in metrics:
+                elo_latest = metrics["elo_latest"].join(team_names_df, on="team_id", how="left")
+                st.subheader("Classement Elo (tracked teams)")
+                st.dataframe(elo_latest.sort("elo", descending=True).to_pandas())
+
+                elo_hist = metrics["elo_hist"].filter(pl.col("team_id") == team_a_id).sort("start_time")
+                df_elo = elo_hist.to_pandas()
+                if not df_elo.empty:
+                    df_elo["start_dt"] = pd.to_datetime(df_elo["start_time"], unit="s")
+                    st.subheader(f"Elo history — {team_a}")
+                    st.line_chart(df_elo.set_index("start_dt")["rating_post"])
+            else:
+                st.info("Elo metrics manquants.")
+    else:
+        st.info("Metrics pré-calculées non trouvées (data/metrics). Lance `make precompute`.")
 
     # Match detail picker (within team A matches)
     st.subheader("Match detail (Team A scope)")

@@ -27,32 +27,3 @@ since 1 january from 2025
 
 
 
-
-
-36261a65-6c8d-4c22-b23f-e09eb5ed0937
-
-TeamName	TeamID
-Aurora Gaming	9467224
-BetBoom Team	8255888
-HEROIC	9303484
-Nigma Galaxy	7554697
-PARIVISION	9572001
-Team Falcons	9247354
-Team Liquid	2163
-Team Spirit	7119388
-Tundra Esports	8291895
-Xtreme Gaming	8261500
-OG	2586976
-Natus Vincere	36
-Virtus.pro	9895392
-MOUZ	9338413
-Runa Team	9758040
-Yakult Brothers	9351740
-BOOM Esports	7732977
-1w Team	9255039
-Pipsqueak+4	9872667
-Passion UA	9247798
-Team Tidebound	9640842
-Team Yandex	9823272
-Amaru Gaming	9879291
-GamerLegion	9964962

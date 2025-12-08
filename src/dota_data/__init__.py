@@ -18,6 +18,20 @@ from .metadata import (
     build_hero_counts,
     load_hero_dictionary,
 )
+from .api import (
+    load_api_key,
+    build_session,
+    load_team_list,
+    fetch_team_matches,
+    annotate_matches_with_team,
+    filter_matches_since,
+    unique_match_ids,
+    fetch_match_detail,
+    fetch_match_details,
+    wrap_raw_match,
+    write_json,
+    fetch_matches_chunked,
+)
 
 __all__ = [
     "load_raw_matches",
@@ -39,4 +53,16 @@ __all__ = [
     "build_player_dictionary",
     "build_hero_counts",
     "load_hero_dictionary",
+    "load_api_key",
+    "build_session",
+    "load_team_list",
+    "fetch_team_matches",
+    "annotate_matches_with_team",
+    "filter_matches_since",
+    "unique_match_ids",
+    "fetch_match_detail",
+    "fetch_match_details",
+    "wrap_raw_match",
+    "write_json",
+    "fetch_matches_chunked",
 ]

@@ -12,3 +12,4 @@ feast
 tqdm
 python-dotenv
 streamlit
+requests

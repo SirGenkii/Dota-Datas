@@ -6,6 +6,12 @@ from typing import Any, Dict, Iterable, List
 
 import polars as pl
 
+
+def _to_df(rows: List[Dict[str, Any]]) -> pl.DataFrame:
+    """Create a DataFrame with wide schema inference to avoid type conflicts."""
+    infer_len = len(rows) if rows else 0
+    return pl.DataFrame(rows, strict=False, infer_schema_length=infer_len if infer_len > 0 else None)
+
 # Keys that are nested/timeline-heavy and should be handled separately from the match header table.
 EXCLUDED_MATCH_KEYS = {
     "players",
@@ -44,7 +50,7 @@ def matches_table(raw: Iterable[Dict[str, Any]]) -> pl.DataFrame:
         row["objectives_count"] = len(match.get("objectives", []))
         row["teamfights_count"] = len(match.get("teamfights", []))
         rows.append(row)
-    return pl.DataFrame(rows, strict=False)
+    return _to_df(rows)
 
 
 def players_table(raw: Iterable[Dict[str, Any]]) -> pl.DataFrame:
@@ -59,7 +65,7 @@ def players_table(raw: Iterable[Dict[str, Any]]) -> pl.DataFrame:
             slot = player.get("player_slot", 0)
             row["is_radiant"] = slot < 128
             rows.append(row)
-    return pl.DataFrame(rows, strict=False)
+    return _to_df(rows)
 
 
 def objectives_table(raw: Iterable[Dict[str, Any]]) -> pl.DataFrame:
@@ -73,7 +79,7 @@ def objectives_table(raw: Iterable[Dict[str, Any]]) -> pl.DataFrame:
             row["match_id"] = match_id
             row["objective_index"] = idx
             rows.append(row)
-    return pl.DataFrame(rows, strict=False)
+    return _to_df(rows)
 
 
 def teamfights_table(raw: Iterable[Dict[str, Any]]) -> pl.DataFrame:
@@ -108,7 +114,7 @@ def teamfights_table(raw: Iterable[Dict[str, Any]]) -> pl.DataFrame:
                 row["deaths_pos"] = _serialize_value(player.get("deaths_pos"))
                 row["killed"] = _serialize_value(player.get("killed"))
                 rows.append(row)
-    return pl.DataFrame(rows, strict=False)
+    return _to_df(rows)
 
 
 def summarize_raw(raw: Iterable[Dict[str, Any]]) -> Dict[str, Any]:

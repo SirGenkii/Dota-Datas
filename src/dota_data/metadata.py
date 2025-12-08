@@ -22,6 +22,28 @@ def _parse_team_field(val: Any) -> dict:
     return {}
 
 
+def _safe_team_id(val: Any) -> Optional[int]:
+    """Convert to int if reasonable; drop overflows/invalids."""
+    try:
+        num = int(val)
+    except (TypeError, ValueError):
+        return None
+    # Filter out absurdly large values that overflow 64-bit (e.g., bogus ids)
+    if num > 9_000_000_000_000_000_000 or num < 0:
+        return None
+    return num
+
+
+def _safe_str(val: Any) -> Optional[str]:
+    """Convert to string for display fields."""
+    if val is None:
+        return None
+    try:
+        return str(val)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def build_team_dictionary(matches: pl.DataFrame) -> pl.DataFrame:
     """Return unique team entries with id/name/tag/logo."""
     rows = []
@@ -33,14 +55,21 @@ def build_team_dictionary(matches: pl.DataFrame) -> pl.DataFrame:
             team_blob = _parse_team_field(row.get(f"{side}_team"))
             rows.append(
                 {
-                    "team_id": team_id or team_blob.get("team_id"),
-                    "name": name or team_blob.get("name"),
-                    "tag": team_blob.get("tag"),
-                    "logo_url": team_blob.get("logo_url") or logo,
+                    "team_id": _safe_team_id(team_id or team_blob.get("team_id")),
+                    "name": _safe_str(name or team_blob.get("name")),
+                    "tag": _safe_str(team_blob.get("tag")),
+                    "logo_url": _safe_str(team_blob.get("logo_url") or logo),
                     "side_sampled": side,
                 }
             )
-    df = pl.DataFrame(rows, strict=False)
+    schema = {
+        "team_id": pl.Int64,
+        "name": pl.Utf8,
+        "tag": pl.Utf8,
+        "logo_url": pl.Utf8,
+        "side_sampled": pl.Utf8,
+    }
+    df = pl.DataFrame(rows, strict=False, schema=schema)
     df = df.filter(pl.any_horizontal(~pl.col(["team_id", "name"]).is_null()))
     return df.unique(subset=["team_id", "name", "tag", "logo_url"])
 
