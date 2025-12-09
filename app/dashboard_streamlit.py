@@ -10,6 +10,7 @@ import pandas as pd
 import polars as pl
 import streamlit as st
 import numpy as np
+import altair as alt
 
 
 def _find_root() -> Path:
@@ -114,6 +115,17 @@ def buckets_for_team(df: pl.DataFrame, team_id: int, minute: int) -> pl.DataFram
     if df is None or df.is_empty():
         return pl.DataFrame([])
     return df.filter((pl.col("team_id") == team_id) & (pl.col("minute") == minute))
+
+
+BUCKET_ORDER = [
+    "[-10k,-5k)",
+    "[-5k,-1k)",
+    "[-1k,0k)",
+    "[0k,1k)",
+    "[1k,5k)",
+    "[5k,10k)",
+    ">=10k",
+]
 
 
 def series_stats_for_team(series_team: pl.DataFrame, team_id: int) -> pl.DataFrame:
@@ -344,7 +356,7 @@ def team_block(
     if logo_url:
         col_logo, col_label = st.columns([1, 5])
         with col_logo:
-            st.image(logo_url, width=64)
+            st.image(logo_url)
         with col_label:
             st.subheader(label)
     else:
@@ -352,61 +364,6 @@ def team_block(
     if team_id is None:
         st.info("Select a team.")
         return
-
-    # Top stats: firsts + roshan
-    firsts = metrics.get("firsts")
-    roshan = metrics.get("roshan")
-
-    first_team = firsts_for_team(firsts, team_id)
-    roshan_team = roshan_for_team(roshan, team_id)
-
-    winrate = None
-    if matches_raw is not None:
-        sub = matches_raw.filter((pl.col("radiant_team_id") == team_id) | (pl.col("dire_team_id") == team_id))
-        if not sub.is_empty():
-            tmp = sub.with_columns(
-                pl.when(pl.col("radiant_team_id") == team_id)
-                .then(pl.col("radiant_win").cast(pl.Float64))
-                .otherwise(1 - pl.col("radiant_win").cast(pl.Float64))
-                .alias("team_win")
-            )
-            winrate = tmp["team_win"].mean()
-
-    # Aggregate firsts (weighted by matches to match pick_outcomes overall)
-    if not first_team.is_empty():
-        total_matches = first_team["matches"].sum()
-        weights = first_team["matches"] / total_matches if total_matches else first_team["matches"]
-        fb = (first_team["first_blood_rate"] * weights).sum()
-        ft = (first_team["first_tower_rate"] * weights).sum()
-        fr = (first_team["first_roshan_rate"] * weights).sum()
-        fb_n = first_team["first_blood_count"].sum()
-        ft_n = first_team["first_tower_count"].sum()
-        fr_n = first_team["first_roshan_count"].sum()
-    else:
-        fb = ft = fr = None
-        fb_n = ft_n = fr_n = None
-
-    # Roshan aggregates
-    rk = roshan_team["roshan_kills_avg"].item() if not roshan_team.is_empty() else None
-    ac = roshan_team["aegis_claims_avg"].item() if not roshan_team.is_empty() else None
-    steals = roshan_team["steals_total"].item() if not roshan_team.is_empty() else None
-
-    c0, c1, c2, c3 = st.columns(4)
-    c0.metric("Winrate", f"{winrate*100:.3f}%" if winrate is not None else "N/A")
-    c1.metric("First blood %", f"{fb*100:.3f}% (count={fb_n})" if fb is not None and fb_n is not None else "N/A")
-    c2.metric("First tower %", f"{ft*100:.3f}% (count={ft_n})" if ft is not None and ft_n is not None else "N/A")
-    c3.metric("First Roshan %", f"{fr*100:.3f}% (count={fr_n})" if fr is not None and fr_n is not None else "N/A")
-    c4, c5, c6 = st.columns(3)
-    c4.metric("Roshan kills avg", f"{rk:.2f}" if rk is not None else "N/A")
-    c5.metric("Aegis claims avg", f"{ac:.2f}" if ac is not None else "N/A")
-    steals_rate = roshan_team["steals_rate"].item() if not roshan_team.is_empty() and "steals_rate" in roshan_team.columns else None
-    c6.metric("Aegis steals total", steals if steals is not None else "N/A")
-    if steals_rate is not None:
-        st.caption(f"Aegis steals (>=1 per match): {steals_rate*100:.3f}%")
-
-    if matches_raw is not None and objectives is not None:
-        combo = combined_firsts_win(matches_raw, objectives, team_id)
-        st.metric("First blood+tower+roshan & win %", f"{combo*100:.3f}%" if combo is not None else "N/A")
 
     # Pick/side outcomes table
     pick_df = pick_outcomes_for_team(metrics.get("pick_outcomes"), team_id)
@@ -454,40 +411,12 @@ def team_block(
     else:
         st.info("No pick/side outcomes for this team.")
 
-    with st.expander("Firsts by side", expanded=False):
-        if not first_team.is_empty():
-            col_rad, col_dire = st.columns(2)
-            for side_bool, label, col in [(True, "Radiant", col_rad), (False, "Dire", col_dire)]:
-                sub = first_team.filter(pl.col("team_is_radiant") == side_bool)
-                if sub.is_empty():
-                    continue
-                row = sub.row(0, named=True)
-                fb_n = row.get("first_blood_count", None)
-                ft_n = row.get("first_tower_count", None)
-                fr_n = row.get("first_roshan_count", None)
-                fb_val = (
-                    f"{row['first_blood_rate']*100:.3f}% (count={fb_n})" if row["first_blood_rate"] is not None else "N/A"
-                )
-                ft_val = (
-                    f"{row['first_tower_rate']*100:.3f}% (count={ft_n})" if row["first_tower_rate"] is not None else "N/A"
-                )
-                fr_val = (
-                    f"{row['first_roshan_rate']*100:.3f}% (count={fr_n})" if row["first_roshan_rate"] is not None else "N/A"
-                )
-                with col:
-                    st.markdown(f"**{label}** ({row.get('matches', 'N/A')} games)")
-                    st.metric("First blood %", fb_val)
-                    st.metric("First tower %", ft_val)
-                    st.metric("First Roshan %", fr_val)
-        else:
-            st.info("No firsts data for this team.")
-
     # Gold/XP buckets
     gold_df = metrics.get("gold_buckets")
     xp_df = metrics.get("xp_buckets")
     if gold_df is not None and not gold_df.is_empty():
         minutes = sorted(gold_df["minute"].unique())
-        default_min = minutes[0] if minutes else 10
+        default_min = 10 if 10 in minutes else (minutes[0] if minutes else 10)
         min_choice = st.selectbox(
             "Minute (gold/xp buckets)",
             minutes,
@@ -497,9 +426,23 @@ def team_block(
         gold_team = buckets_for_team(gold_df, team_id, min_choice)
         if not gold_team.is_empty():
             df_gold = gold_team.to_pandas()
-            gold_plot = df_gold.groupby("bucket")["winrate"].mean().reset_index().set_index("bucket")
+            gold_plot = df_gold.groupby("bucket", as_index=False)["winrate"].mean()
+            # order buckets
+            cats = [b for b in BUCKET_ORDER if b in gold_plot["bucket"].unique()]
+            gold_plot["bucket"] = pd.Categorical(gold_plot["bucket"], categories=cats, ordered=True)
+            gold_plot = gold_plot.sort_values("bucket")
             st.subheader("Gold advantage buckets")
-            st.bar_chart(gold_plot, height=250)
+            chart = (
+                alt.Chart(gold_plot)
+                .mark_bar()
+                .encode(
+                    x=alt.X("bucket:N", sort=cats, axis=alt.Axis(labelAngle=0, labelFontSize=18, titleFontSize=18)),
+                    y=alt.Y("winrate:Q", title="Winrate", axis=alt.Axis(labelFontSize=18, titleFontSize=18)),
+                    tooltip=["bucket", alt.Tooltip("winrate:Q", format=".3f")],
+                )
+            )
+            text = chart.mark_text(dy=-8, color="black", size=22).encode(text=alt.Text("winrate:Q", format=".1%"))
+            st.altair_chart(chart + text, use_container_width=True)
             with st.expander("Full table (gold buckets)", expanded=False):
                 st.dataframe(df_gold)
         else:
@@ -507,9 +450,22 @@ def team_block(
         if xp_df is not None and not buckets_for_team(xp_df, team_id, min_choice).is_empty():
             xp_team = buckets_for_team(xp_df, team_id, min_choice)
             df_xp = xp_team.to_pandas()
-            xp_plot = df_xp.groupby("bucket")["winrate"].mean().reset_index().set_index("bucket")
+            xp_plot = df_xp.groupby("bucket", as_index=False)["winrate"].mean()
+            cats_xp = [b for b in BUCKET_ORDER if b in xp_plot["bucket"].unique()]
+            xp_plot["bucket"] = pd.Categorical(xp_plot["bucket"], categories=cats_xp, ordered=True)
+            xp_plot = xp_plot.sort_values("bucket")
             st.subheader("XP advantage buckets")
-            st.bar_chart(xp_plot, height=250)
+            chart_xp = (
+                alt.Chart(xp_plot)
+                .mark_bar()
+                .encode(
+                    x=alt.X("bucket:N", sort=cats_xp, axis=alt.Axis(labelAngle=0, labelFontSize=18, titleFontSize=18)),
+                    y=alt.Y("winrate:Q", title="Winrate", axis=alt.Axis(labelFontSize=18, titleFontSize=18)),
+                    tooltip=["bucket", alt.Tooltip("winrate:Q", format=".3f")],
+                )
+            )
+            text_xp = chart_xp.mark_text(dy=-8, color="black", size=22).encode(text=alt.Text("winrate:Q", format=".1%"))
+            st.altair_chart(chart_xp + text_xp, use_container_width=True)
             with st.expander("Full table (xp buckets)", expanded=False):
                 st.dataframe(df_xp)
     else:
@@ -524,11 +480,30 @@ def team_block(
             # Map series_type to label
             bo_map = {0: "BO1", 1: "BO3", 2: "BO5", 3: "BO2"}
             df_team["bo_type"] = df_team["series_type"].map(bo_map).fillna("other")
-            bo_choice = st.selectbox("BO type", sorted(df_team["bo_type"].unique()), index=0, key=f"bo_type_{team_id}")
+            bo_options = sorted(df_team["bo_type"].unique())
+            default_idx = bo_options.index("BO3") if "BO3" in bo_options else 0
+            bo_choice = st.selectbox("BO type", bo_options, index=default_idx, key=f"bo_type_{team_id}")
             df_sel = df_team[df_team["bo_type"] == bo_choice]
-            st.dataframe(df_sel[["map_num", "winrate", "maps_played"]])
+
             if not df_sel.empty:
-                st.bar_chart(df_sel.set_index("map_num")["winrate"])
+                df_sel = df_sel.copy()
+                df_sel["map_label"] = df_sel["map_num"].apply(lambda x: f"Map {x}")
+                chart_series = (
+                    alt.Chart(df_sel)
+                    .mark_bar()
+                    .encode(
+                        x=alt.X("map_label:N", axis=alt.Axis(title="Map num", labelFontSize=18, titleFontSize=18, labelAngle=0)),
+                        y=alt.Y("winrate:Q", axis=alt.Axis(title="Winrate", labelFontSize=18, titleFontSize=18)),
+                        tooltip=["map_num", "map_label", alt.Tooltip("winrate:Q", format=".3f"), "maps_played"],
+                    )
+                )
+                text_series = chart_series.mark_text(dy=-8, color="black", size=22).encode(text=alt.Text("winrate:Q", format=".1%"))
+                st.altair_chart(chart_series + text_series, use_container_width=True)
+
+                with st.expander("Full table (winrate by map_num)", expanded=False):
+                    st.dataframe(df_sel[["map_num", "winrate", "maps_played"]])
+
+               
         else:
             st.info("No series data for this team.")
     else:
@@ -536,8 +511,16 @@ def team_block(
 
     # Elo history
     elo_hist = metrics.get("elo_hist")
+    elo_latest = metrics.get("elo_latest")
     if elo_hist is not None and not elo_hist.is_empty():
         st.subheader("Elo history")
+        current_elo = None
+        if elo_latest is not None and not elo_latest.is_empty():
+            cur = elo_latest.filter(pl.col("team_id") == team_id)
+            if not cur.is_empty():
+                current_elo = cur["elo"][0]
+        if current_elo is not None:
+            st.markdown(f"<h2 style='margin-top:-10px;'>Elo: {current_elo:.1f}</h2>", unsafe_allow_html=True)
         df_elo = elo_history_for_team(elo_hist, team_id)
         if not df_elo.empty:
             st.line_chart(df_elo.set_index("start_dt")["rating_post"])
