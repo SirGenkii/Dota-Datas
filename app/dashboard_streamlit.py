@@ -5,6 +5,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Optional, Tuple
+from datetime import datetime
 
 import pandas as pd
 import polars as pl
@@ -115,6 +116,48 @@ def buckets_for_team(df: pl.DataFrame, team_id: int, minute: int) -> pl.DataFram
     if df is None or df.is_empty():
         return pl.DataFrame([])
     return df.filter((pl.col("team_id") == team_id) & (pl.col("minute") == minute))
+
+def bucketize_value(val: float) -> str:
+    buckets = [-10_000, -5_000, -1_000, 0, 1_000, 5_000, 10_000, 999_999]
+    for i in range(len(buckets) - 1):
+        if buckets[i] <= val < buckets[i + 1]:
+            return f"[{buckets[i]/1000:.0f}k,{buckets[i+1]/1000:.0f}k)"
+    return f">={buckets[-2]/1000:.0f}k"
+
+
+def recent_matches_for_bucket(team_id: int, team_name: str, minute: int, bucket: str, key: str, matches_raw: pl.DataFrame, raw_map: dict, limit: int = 10):
+    """Return recent matches for a team where its advantage at minute falls in bucket."""
+    records = []
+    for r in matches_raw.iter_rows(named=True):
+        if r.get("radiant_team_id") not in (team_id, r.get("dire_team_id")) and r.get("dire_team_id") != team_id:
+            continue
+        mid = r.get("match_id")
+        if mid not in raw_map:
+            continue
+        raw = raw_map[mid]
+        adv_arr = raw.get(key) or []
+        try:
+            adv_arr = [float(x) for x in adv_arr]
+        except Exception:
+            continue
+        if not adv_arr:
+            continue
+        idx = min(minute, len(adv_arr) - 1)
+        adv = adv_arr[idx]
+        team_is_rad = r.get("radiant_team_id") == team_id
+        adv = adv if team_is_rad else -adv
+        b = bucketize_value(adv)
+        if b != bucket:
+            continue
+        opp_id = r.get("dire_team_id") if team_is_rad else r.get("radiant_team_id")
+        opp_name = r.get("dire_name") if team_is_rad else r.get("radiant_name")
+        if not opp_name:
+            opp_name = str(opp_id)
+        dt = datetime.fromtimestamp(r.get("start_time", 0))
+        label = f"{team_name} VS {opp_name} ({dt:%d/%m/%Y})"
+        records.append({"match_id": mid, "label": label, "start_time": r.get("start_time", 0)})
+    records = sorted(records, key=lambda x: x["start_time"], reverse=True)
+    return records[:limit]
 
 
 BUCKET_ORDER = [
@@ -411,6 +454,7 @@ def team_block(
     matches_count: Optional[int] = None,
     matches_raw: Optional[pl.DataFrame] = None,
     objectives: Optional[pl.DataFrame] = None,
+    raw_map: Optional[dict] = None,
 ):
     suffix = f" ({matches_count} games)" if matches_count is not None else ""
     label = f"{team_name}{suffix}" if team_name else f"{title}{suffix}"
@@ -506,6 +550,23 @@ def team_block(
             st.altair_chart(chart + text, use_container_width=True)
             with st.expander("Full table (gold buckets)", expanded=False):
                 st.dataframe(df_gold)
+
+
+                if matches_raw is not None and raw_map is not None:
+                    bucket_options = ["(none)"] + [b for b in cats if b in df_gold["bucket"].unique()]
+                    if len(bucket_options) > 1:
+                        bucket_choice = st.selectbox("Bucket range (gold)", bucket_options, index=0, key=f"gold_bucket_choice_{team_id}_{title}")
+                        if bucket_choice != "(none)":
+                            recent = recent_matches_for_bucket(team_id, team_name, min_choice, bucket_choice, "radiant_gold_adv", matches_raw, raw_map, limit=10)
+                            if recent:
+                                st.markdown("Recent matches in this bucket:", unsafe_allow_html=True)
+                                for r in recent:
+                                    st.markdown(
+                                        f"<div><a href='https://www.dotabuff.com/matches/{r['match_id']}' target='_blank'>{r['label']}</a></div>",
+                                        unsafe_allow_html=True,
+                                    )
+                            else:
+                                st.info("No matches in this bucket at this minute.")
         else:
             st.info("No gold buckets for this team/minute.")
         if xp_df is not None and not buckets_for_team(xp_df, team_id, min_choice).is_empty():
@@ -529,6 +590,21 @@ def team_block(
             st.altair_chart(chart_xp + text_xp, use_container_width=True)
             with st.expander("Full table (xp buckets)", expanded=False):
                 st.dataframe(df_xp)
+                if matches_raw is not None and raw_map is not None:
+                    bucket_options_xp = ["(none)"] + [b for b in cats_xp if b in df_xp["bucket"].unique()]
+                    if len(bucket_options_xp) > 1:
+                        bucket_choice_xp = st.selectbox("Bucket range (xp)", bucket_options_xp, index=0, key=f"xp_bucket_choice_{team_id}_{title}")
+                        if bucket_choice_xp != "(none)":
+                            recent_xp = recent_matches_for_bucket(team_id, team_name, min_choice, bucket_choice_xp, "radiant_xp_adv", matches_raw, raw_map, limit=10)
+                            if recent_xp:
+                                st.markdown("Recent matches in this bucket:", unsafe_allow_html=True)
+                                for r in recent_xp:
+                                    st.markdown(
+                                        f"<div><a href='https://www.dotabuff.com/matches/{r['match_id']}' target='_blank'>{r['label']}</a></div>",
+                                        unsafe_allow_html=True,
+                                    )
+                            else:
+                                st.info("No matches in this bucket at this minute.")
     else:
         st.info("No gold/xp metrics (run make precompute).")
 
@@ -658,6 +734,7 @@ def main():
             matches_count=matches_a,
             matches_raw=matches_raw,
             objectives=objectives,
+            raw_map=raw_map,
         )
     else:
         col_left, col_right = st.columns([1, 1], gap="small")
@@ -671,6 +748,7 @@ def main():
                 matches_count=matches_a,
                 matches_raw=matches_raw,
                 objectives=objectives,
+                raw_map=raw_map,
             )
         # Ligne verticale fine entre les colonnes
         st.markdown(
@@ -689,6 +767,7 @@ def main():
                 matches_count=matches_b,
                 matches_raw=matches_raw,
                 objectives=objectives,
+                raw_map=raw_map,
             )
 
         # Head-to-head section
