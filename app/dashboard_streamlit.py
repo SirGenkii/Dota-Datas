@@ -652,12 +652,16 @@ def team_block(
     if elo_hist is not None and not elo_hist.is_empty():
         st.subheader("Elo history")
         current_elo = None
+        current_rank = None
         if elo_latest is not None and not elo_latest.is_empty():
             cur = elo_latest.filter(pl.col("team_id") == team_id)
             if not cur.is_empty():
                 current_elo = cur["elo"][0]
+                if "elo_rank" in cur.columns:
+                    current_rank = cur["elo_rank"][0]
         if current_elo is not None:
-            st.markdown(f"<h2 style='margin-top:-10px;'>Elo: {current_elo:.1f}</h2>", unsafe_allow_html=True)
+            rank_txt = f" (rank #{int(current_rank)})" if current_rank is not None else ""
+            st.markdown(f"<h2 style='margin-top:-10px;'>Elo: {current_elo:.1f}{rank_txt}</h2>", unsafe_allow_html=True)
         df_elo = elo_history_for_team(elo_hist, team_id)
         if not df_elo.empty:
             st.line_chart(df_elo.set_index("start_dt")["rating_post"])

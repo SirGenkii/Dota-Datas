@@ -660,9 +660,19 @@ def main():
     matches_raw = tables["matches"]
     objectives = tables["objectives"]
 
-    team_ids = load_lookup(Path(args.teams))
+    teams_csv = pl.read_csv(args.teams)
+    team_ids = teams_csv["TeamID"].to_list()
     teams_dict = build_team_dictionary(matches_raw)
-    tracked_names = teams_dict.filter(pl.col("team_id").is_in(team_ids))[["team_id", "name"]]
+    tracked_names = (
+        teams_dict.filter(pl.col("team_id").is_in(team_ids))
+        .group_by("team_id")
+        .agg(pl.col("name").drop_nulls().first().alias("name"))
+    )
+    # prefer canonical name from CSV
+    tracked_names = teams_csv.select(pl.col("TeamID").alias("team_id"), pl.col("TeamName").alias("csv_name")).join(
+        tracked_names, on="team_id", how="left"
+    )
+    tracked_names = tracked_names.with_columns(pl.coalesce(pl.col("csv_name"), pl.col("name")).alias("name")).select(["team_id", "name"])
 
     raw_path = Path(args.raw)
     if not raw_path.exists():
@@ -679,6 +689,8 @@ def main():
         base_elo=args.base_elo,
         side_adv=args.side_adv,
     )
+    # Add leaderboard rank (1 = highest elo)
+    elo_latest = elo_latest.with_columns(pl.col("elo").rank(method="dense", descending=True).alias("elo_rank"))
     firsts = compute_firsts(matches_raw, objectives, tables["players"], tracked_ids=team_ids)
     roshan = compute_roshan_metrics(matches_raw, objectives, tracked_ids=team_ids)
     gold_buckets = compute_adv_buckets(matches_raw, raw_map=raw_map, tracked_ids=team_ids, key="radiant_gold_adv", minutes=(5, 10, 12, 15, 20))
