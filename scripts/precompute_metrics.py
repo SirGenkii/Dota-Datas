@@ -166,12 +166,12 @@ def compute_firsts(matches: pl.DataFrame, objectives: pl.DataFrame, players: pl.
     agg = (
         df.group_by(["team_id", "team_is_radiant"])
         .agg(
-            pl.col("first_blood").mean().alias("first_blood_rate"),
-            pl.col("first_tower").mean().alias("first_tower_rate"),
-            pl.col("first_roshan").mean().alias("first_roshan_rate"),
-            pl.sum("first_blood").alias("first_blood_count"),
-            pl.sum("first_tower").alias("first_tower_count"),
-            pl.sum("first_roshan").alias("first_roshan_count"),
+            (pl.col("first_blood").fill_null(False).cast(pl.Int64).sum() / pl.len()).alias("first_blood_rate"),
+            (pl.col("first_tower").fill_null(False).cast(pl.Int64).sum() / pl.len()).alias("first_tower_rate"),
+            (pl.col("first_roshan").fill_null(False).cast(pl.Int64).sum() / pl.len()).alias("first_roshan_rate"),
+            pl.col("first_blood").fill_null(False).cast(pl.Int64).sum().alias("first_blood_count"),
+            pl.col("first_tower").fill_null(False).cast(pl.Int64).sum().alias("first_tower_count"),
+            pl.col("first_roshan").fill_null(False).cast(pl.Int64).sum().alias("first_roshan_count"),
             pl.len().alias("matches"),
         )
         .sort(["team_id", "team_is_radiant"])
@@ -290,23 +290,15 @@ def compute_pick_outcomes(
             if team_id not in tracked_ids:
                 continue
             win = radiant_win if team_is_radiant else (1 - int(radiant_win))
-            fb_hit = fb_is_rad == team_is_radiant if fb_is_rad is not None else None
+            fb_hit = fb_is_rad == team_is_radiant if fb_is_rad is not None else False
             ft_hit = (ft_building_is_rad is not None and ft_building_is_rad != team_is_radiant)
-            ft_hit = ft_hit if ft_building_is_rad is not None else None
-            if fr_side is None:
-                fr_hit = None
-            else:
-                fr_hit = (fr_side == "radiant") == team_is_radiant
-            combo_for = combo_against = None
-            if fb_hit is not None and ft_hit is not None and fr_hit is not None:
-                combo_for = bool(fb_hit and ft_hit and fr_hit and win)
-                combo_against = bool((not fb_hit) and (not ft_hit) and (not fr_hit) and (not win))
+            ft_hit = ft_hit if ft_building_is_rad is not None else False
+            fr_hit = (fr_side == "radiant") == team_is_radiant if fr_side is not None else False
+            combo_for = bool(fb_hit and ft_hit and fr_hit and win)
+            combo_against = bool((not fb_hit) and (not ft_hit) and (not fr_hit) and (not win))
 
-            steal_for = None
-            steal_against = None
-            if steals_rad is not None and steals_dire is not None:
-                steal_for = (steals_rad if team_is_radiant else steals_dire) > 0
-                steal_against = (steals_dire if team_is_radiant else steals_rad) > 0
+            steal_for = (steals_rad if team_is_radiant else steals_dire) > 0 if steals_rad is not None and steals_dire is not None else False
+            steal_against = (steals_dire if team_is_radiant else steals_rad) > 0 if steals_rad is not None and steals_dire is not None else False
 
             rows.append(
                 {
