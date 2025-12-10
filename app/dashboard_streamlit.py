@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import json
-import os
 import sys
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 from datetime import datetime
 
 import pandas as pd
@@ -31,22 +29,15 @@ from src.dota_data import (  # noqa: E402
     build_team_dictionary,
 )
 
-RAW_PATH_DEFAULT = Path("data/raw/data_v2.json")
 PROCESSED_DIR_DEFAULT = Path("data/processed")
 METRICS_DIR_DEFAULT = Path("data/metrics")
 TEAMS_CSV_DEFAULT = Path("data/teams_to_look.csv")
+COMPARE_PATH = Path("data/interim/compare_list.csv")
 
 
 @st.cache_data(show_spinner=False)
-def load_tables(raw_path: Path, processed_dir: Path):
-    tables = read_processed_tables(processed_dir)
-    return tables
-
-
-@st.cache_data(show_spinner=False)
-def load_raw_map(raw_path: Path):
-    data = json.loads(raw_path.read_text())
-    return {item["json"]["match_id"]: item["json"] for item in data}
+def load_tables(processed_dir: Path):
+    return read_processed_tables(processed_dir)
 
 
 @st.cache_data(show_spinner=False)
@@ -63,6 +54,8 @@ def load_metrics(metrics_dir: Path):
         "series_team": metrics_dir / "series_team_stats.parquet",
         "tracked_teams": metrics_dir / "tracked_teams.parquet",
         "pick_outcomes": metrics_dir / "pick_outcomes.parquet",
+        "draft_meta": metrics_dir / "draft_meta.parquet",
+        "adv_snapshots": metrics_dir / "adv_snapshots.parquet",
     }
     for key, path in files.items():
         if path.exists():
@@ -100,6 +93,21 @@ def load_team_options(teams_dict: pl.DataFrame, tracked_names: Optional[pl.DataF
     return base.sort("name")
 
 
+def load_compare_list(path: Path) -> pd.DataFrame:
+    if path.exists():
+        try:
+            return pd.read_csv(path)
+        except Exception:
+            return pd.DataFrame()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return pd.DataFrame()
+
+
+def save_compare_list(df: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=False)
+
+
 def firsts_for_team(firsts: pl.DataFrame, team_id: int) -> pl.DataFrame:
     if firsts is None or firsts.is_empty():
         return pl.DataFrame([])
@@ -117,47 +125,40 @@ def buckets_for_team(df: pl.DataFrame, team_id: int, minute: int) -> pl.DataFram
         return pl.DataFrame([])
     return df.filter((pl.col("team_id") == team_id) & (pl.col("minute") == minute))
 
-def bucketize_value(val: float) -> str:
-    buckets = [-10_000, -5_000, -1_000, 0, 1_000, 5_000, 10_000, 999_999]
-    for i in range(len(buckets) - 1):
-        if buckets[i] <= val < buckets[i + 1]:
-            return f"[{buckets[i]/1000:.0f}k,{buckets[i+1]/1000:.0f}k)"
-    return f">={buckets[-2]/1000:.0f}k"
 
-
-def recent_matches_for_bucket(team_id: int, team_name: str, minute: int, bucket: str, key: str, matches_raw: pl.DataFrame, raw_map: dict, limit: int = 10):
-    """Return recent matches for a team where its advantage at minute falls in bucket."""
+def recent_matches_for_bucket(
+    team_id: int,
+    team_name: str,
+    minute: int,
+    bucket: str,
+    metric: str,
+    matches_raw: pl.DataFrame,
+    adv_snapshots: pl.DataFrame,
+    limit: int = 10,
+):
+    """Return recent matches for a team where its advantage at minute falls in bucket (using precomputed parquet)."""
+    if adv_snapshots is None or adv_snapshots.is_empty():
+        return []
+    bucket_col = "gold_bucket" if metric == "gold" else "xp_bucket"
+    filtered = adv_snapshots.filter(
+        (pl.col("team_id") == team_id) & (pl.col("minute") == minute) & (pl.col(bucket_col) == bucket)
+    )
+    if filtered.is_empty():
+        return []
+    meta_cols = ["match_id", "radiant_name", "dire_name", "start_time", "radiant_team_id", "dire_team_id"]
+    meta = matches_raw.select([c for c in meta_cols if c in matches_raw.columns])
+    df = filtered.join(meta, on="match_id", how="left")
+    df = df.sort("start_time", descending=True).head(limit)
     records = []
-    for r in matches_raw.iter_rows(named=True):
-        if r.get("radiant_team_id") not in (team_id, r.get("dire_team_id")) and r.get("dire_team_id") != team_id:
-            continue
-        mid = r.get("match_id")
-        if mid not in raw_map:
-            continue
-        raw = raw_map[mid]
-        adv_arr = raw.get(key) or []
-        try:
-            adv_arr = [float(x) for x in adv_arr]
-        except Exception:
-            continue
-        if not adv_arr:
-            continue
-        idx = min(minute, len(adv_arr) - 1)
-        adv = adv_arr[idx]
-        team_is_rad = r.get("radiant_team_id") == team_id
-        adv = adv if team_is_rad else -adv
-        b = bucketize_value(adv)
-        if b != bucket:
-            continue
-        opp_id = r.get("dire_team_id") if team_is_rad else r.get("radiant_team_id")
-        opp_name = r.get("dire_name") if team_is_rad else r.get("radiant_name")
+    for r in df.iter_rows(named=True):
+        opp_name = r.get("dire_name") if r.get("team_is_radiant") else r.get("radiant_name")
         if not opp_name:
+            opp_id = r.get("opponent_id") or (r.get("dire_team_id") if r.get("team_is_radiant") else r.get("radiant_team_id"))
             opp_name = str(opp_id)
         dt = datetime.fromtimestamp(r.get("start_time", 0))
         label = f"{team_name} VS {opp_name} ({dt:%d/%m/%Y})"
-        records.append({"match_id": mid, "label": label, "start_time": r.get("start_time", 0)})
-    records = sorted(records, key=lambda x: x["start_time"], reverse=True)
-    return records[:limit]
+        records.append({"match_id": r.get("match_id"), "label": label, "start_time": r.get("start_time", 0)})
+    return records
 
 
 BUCKET_ORDER = [
@@ -249,13 +250,25 @@ def combined_firsts_win(matches: pl.DataFrame, objectives: pl.DataFrame, team_id
     return float(np.mean(flags))
 
 
-def compute_h2h_metrics(team_a_id: int, team_b_id: int, matches: pl.DataFrame, objectives: pl.DataFrame, players: pl.DataFrame, raw_map: Dict[int, dict], last_n: int = 10) -> Optional[dict]:
+def compute_h2h_metrics(
+    team_a_id: int,
+    team_b_id: int,
+    matches: pl.DataFrame,
+    objectives: pl.DataFrame,
+    players: pl.DataFrame,
+    draft_meta: Optional[pl.DataFrame],
+    last_n: int = 10,
+) -> Optional[dict]:
     pair = matches.filter(
         ((pl.col("radiant_team_id") == team_a_id) & (pl.col("dire_team_id") == team_b_id))
         | ((pl.col("radiant_team_id") == team_b_id) & (pl.col("dire_team_id") == team_a_id))
     )
     if pair.is_empty():
         return None
+
+    draft_lookup = {}
+    if draft_meta is not None and not draft_meta.is_empty():
+        draft_lookup = {int(r["match_id"]): (r.get("first_pick_team_id"), r.get("last_pick_team_id")) for r in draft_meta.iter_rows(named=True)}
 
     match_ids = pair["match_id"].to_list()
     obj = objectives.filter(pl.col("match_id").is_in(match_ids))
@@ -330,15 +343,10 @@ def compute_h2h_metrics(team_a_id: int, team_b_id: int, matches: pl.DataFrame, o
         radiant_win = r.get("radiant_win")
         if None in (mid, rad_id, dire_id, radiant_win):
             continue
-        raw = raw_map.get(mid, {})
-        pb = raw.get("picks_bans") or []
-        picks = [x for x in pb if x.get("is_pick")]
         first_pick_team = last_pick_team = None
-        if picks:
-            first = min(picks, key=lambda x: x.get("order", 0))
-            last = max(picks, key=lambda x: x.get("order", 0))
-            first_pick_team = rad_id if first.get("team") == 0 else dire_id
-            last_pick_team = rad_id if last.get("team") == 0 else dire_id
+        draft_vals = draft_lookup.get(mid)
+        if draft_vals:
+            first_pick_team, last_pick_team = draft_vals
 
         fb_is_rad = fb_map.get(mid)
         ft_building_is_rad = ft_map.get(mid)
@@ -454,7 +462,7 @@ def team_block(
     matches_count: Optional[int] = None,
     matches_raw: Optional[pl.DataFrame] = None,
     objectives: Optional[pl.DataFrame] = None,
-    raw_map: Optional[dict] = None,
+    adv_snapshots: Optional[pl.DataFrame] = None,
 ):
     suffix = f" ({matches_count} games)" if matches_count is not None else ""
     label = f"{team_name}{suffix}" if team_name else f"{title}{suffix}"
@@ -550,14 +558,12 @@ def team_block(
             st.altair_chart(chart + text, use_container_width=True)
             with st.expander("Full table (gold buckets)", expanded=False):
                 st.dataframe(df_gold)
-
-
-                if matches_raw is not None and raw_map is not None:
+                if matches_raw is not None and adv_snapshots is not None:
                     bucket_options = ["(none)"] + [b for b in cats if b in df_gold["bucket"].unique()]
                     if len(bucket_options) > 1:
                         bucket_choice = st.selectbox("Bucket range (gold)", bucket_options, index=0, key=f"gold_bucket_choice_{team_id}_{title}")
                         if bucket_choice != "(none)":
-                            recent = recent_matches_for_bucket(team_id, team_name, min_choice, bucket_choice, "radiant_gold_adv", matches_raw, raw_map, limit=10)
+                            recent = recent_matches_for_bucket(team_id, team_name, min_choice, bucket_choice, "gold", matches_raw, adv_snapshots, limit=10)
                             if recent:
                                 st.markdown("Recent matches in this bucket:", unsafe_allow_html=True)
                                 for r in recent:
@@ -590,12 +596,12 @@ def team_block(
             st.altair_chart(chart_xp + text_xp, use_container_width=True)
             with st.expander("Full table (xp buckets)", expanded=False):
                 st.dataframe(df_xp)
-                if matches_raw is not None and raw_map is not None:
+                if matches_raw is not None and adv_snapshots is not None:
                     bucket_options_xp = ["(none)"] + [b for b in cats_xp if b in df_xp["bucket"].unique()]
                     if len(bucket_options_xp) > 1:
                         bucket_choice_xp = st.selectbox("Bucket range (xp)", bucket_options_xp, index=0, key=f"xp_bucket_choice_{team_id}_{title}")
                         if bucket_choice_xp != "(none)":
-                            recent_xp = recent_matches_for_bucket(team_id, team_name, min_choice, bucket_choice_xp, "radiant_xp_adv", matches_raw, raw_map, limit=10)
+                            recent_xp = recent_matches_for_bucket(team_id, team_name, min_choice, bucket_choice_xp, "xp", matches_raw, adv_snapshots, limit=10)
                             if recent_xp:
                                 st.markdown("Recent matches in this bucket:", unsafe_allow_html=True)
                                 for r in recent_xp:
@@ -676,12 +682,10 @@ def main():
     st.title("Dota Data Dashboard v2")
     st.caption("Side-by-side comparison using precomputed metrics.")
 
-    raw_path = ROOT / RAW_PATH_DEFAULT
     processed_dir = ROOT / PROCESSED_DIR_DEFAULT
     metrics_dir = ROOT / METRICS_DIR_DEFAULT
 
-    tables = load_tables(raw_path, processed_dir)
-    raw_map = load_raw_map(raw_path)
+    tables = load_tables(processed_dir)
     metrics = load_metrics(metrics_dir)
 
     matches_raw = tables["matches"]
@@ -701,6 +705,86 @@ def main():
     tracked_names = metrics.get("tracked_teams")
     team_names_df = load_team_options(teams_dict, tracked_names, ROOT / TEAMS_CSV_DEFAULT)
     team_options = team_names_df["name"].to_list()
+
+    # Saved teams table (overall outcomes)
+    compare_df = load_compare_list(ROOT / COMPARE_PATH)
+    with st.expander("Saved teams (overall outcomes)", expanded=False):
+        add_c1, add_c2 = st.columns([3, 1], vertical_alignment="bottom")
+        with add_c1:
+            compare_choice = st.selectbox("Add team", team_options, key="compare_add_team")
+        with add_c2:
+            add_clicked = st.button("Add", key="compare_add_btn")
+
+        def get_overall_row(team_id: int, team_name: str) -> Optional[dict]:
+            pick_df = pick_outcomes_for_team(metrics.get("pick_outcomes"), team_id)
+            if pick_df.is_empty():
+                return None
+            row = pick_df.filter(pl.col("label") == "overall")
+            if row.is_empty():
+                return None
+            r = row.row(0, named=True)
+            return {
+                "team_id": team_id,
+                "team": team_name,
+                "winrate": r.get("winrate"),
+                "first_blood_rate": r.get("first_blood_rate"),
+                "first_tower_rate": r.get("first_tower_rate"),
+                "first_roshan_rate": r.get("first_roshan_rate"),
+                "combo_for_rate": r.get("combo_for_rate"),
+                "combo_against_rate": r.get("combo_against_rate"),
+                "aegis_steal_rate": r.get("aegis_steal_rate"),
+                "aegis_steal_against_rate": r.get("aegis_steal_against_rate"),
+                "matches": r.get("matches"),
+            }
+
+        if add_clicked and compare_choice:
+            sel_row = team_names_df.filter(pl.col("name") == compare_choice)
+            if not sel_row.is_empty():
+                tid = sel_row["team_id"][0]
+                new_row = get_overall_row(tid, compare_choice)
+                if new_row:
+                    if compare_df.empty:
+                        compare_df = pd.DataFrame([new_row])
+                    else:
+                        compare_df = compare_df[compare_df["team_id"] != tid]
+                        compare_df = pd.concat([compare_df, pd.DataFrame([new_row])], ignore_index=True)
+                    save_compare_list(compare_df, ROOT / COMPARE_PATH)
+
+        if not compare_df.empty:
+            display_df = compare_df.copy()
+            pct_cols = [
+                "winrate",
+                "first_blood_rate",
+                "first_tower_rate",
+                "first_roshan_rate",
+                "combo_for_rate",
+                "combo_against_rate",
+                "aegis_steal_rate",
+                "aegis_steal_against_rate",
+            ]
+            for col in pct_cols:
+                if col in display_df.columns:
+                    display_df[col] = (display_df[col] * 100).round(2)
+            # Format percentage columns with suffix
+            for col in pct_cols:
+                if col in display_df.columns:
+                    display_df[col] = display_df[col].map(lambda x: f"{x:.2f}%" if pd.notnull(x) else "N/A")
+            st.dataframe(display_df.drop(columns=["team_id"]), use_container_width=True)
+            # Buttons under table for remove (one per team)
+            remove_choices = st.multiselect(
+                "Select teams to remove",
+                options=display_df["team"].to_list(),
+                default=[],
+                key="remove_compare",
+            )
+            if remove_choices:
+                if st.button("Apply removals", key="apply_remove_compare"):
+                    compare_df = compare_df[~compare_df["team"].isin(remove_choices)]
+                    save_compare_list(compare_df, ROOT / COMPARE_PATH)
+                    st.cache_data.clear()
+                    st.rerun()
+        else:
+            st.info("No teams saved yet.")
 
     st.sidebar.header("Filters")
     team_a = st.sidebar.selectbox("Team A", team_options, index=0 if team_options else None, key="team_a_new")
@@ -738,7 +822,7 @@ def main():
             matches_count=matches_a,
             matches_raw=matches_raw,
             objectives=objectives,
-            raw_map=raw_map,
+            adv_snapshots=metrics.get("adv_snapshots"),
         )
     else:
         col_left, col_right = st.columns([1, 1], gap="small")
@@ -752,7 +836,7 @@ def main():
                 matches_count=matches_a,
                 matches_raw=matches_raw,
                 objectives=objectives,
-                raw_map=raw_map,
+                adv_snapshots=metrics.get("adv_snapshots"),
             )
         # Ligne verticale fine entre les colonnes
         st.markdown(
@@ -771,12 +855,20 @@ def main():
                 matches_count=matches_b,
                 matches_raw=matches_raw,
                 objectives=objectives,
-                raw_map=raw_map,
+                adv_snapshots=metrics.get("adv_snapshots"),
             )
 
         # Head-to-head section
         st.header(f"Head-to-head: {team_a} vs {team_b}")
-        h2h = compute_h2h_metrics(team_a_id, team_b_id, matches_raw, objectives, tables["players"], raw_map, last_n=20)
+        h2h = compute_h2h_metrics(
+            team_a_id,
+            team_b_id,
+            matches_raw,
+            objectives,
+            tables["players"],
+            metrics.get("draft_meta"),
+            last_n=20,
+        )
         if h2h is None:
             st.info("No head-to-head games between these teams in the dataset.")
         else:

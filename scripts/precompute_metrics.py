@@ -13,6 +13,9 @@ from src.dota_data import (
     build_team_dictionary,
 )
 
+ADV_BUCKET_MINUTES = (5, 10, 12, 15, 20)
+ADV_BUCKETS = [-10_000, -5_000, -1_000, 0, 1_000, 5_000, 10_000, 999_999]
+
 
 def load_lookup(path: Path) -> List[int]:
     """Load tracked team IDs from CSV."""
@@ -492,22 +495,98 @@ def _parse_adv(val: object) -> List[float]:
     return []
 
 
+def _bucketize_adv(val: float) -> str:
+    for i in range(len(ADV_BUCKETS) - 1):
+        if ADV_BUCKETS[i] <= val < ADV_BUCKETS[i + 1]:
+            return f"[{ADV_BUCKETS[i]/1000:.0f}k,{ADV_BUCKETS[i+1]/1000:.0f}k)"
+    return f">={ADV_BUCKETS[-2]/1000:.0f}k"
+
+
+def compute_draft_meta(matches: pl.DataFrame, raw_map: Dict[int, dict]) -> pl.DataFrame:
+    """Return first/last pick team per match so the app never touches raw picks."""
+    rows = []
+    for row in matches.iter_rows(named=True):
+        mid = row.get("match_id")
+        raw = raw_map.get(mid, {})
+        pb = raw.get("picks_bans") or []
+        picks = [x for x in pb if x.get("is_pick")]
+        first_pick_team = last_pick_team = None
+        if picks:
+            first = min(picks, key=lambda x: x.get("order", 0))
+            last = max(picks, key=lambda x: x.get("order", 0))
+            first_pick_team = row.get("radiant_team_id") if first.get("team") == 0 else row.get("dire_team_id")
+            last_pick_team = row.get("radiant_team_id") if last.get("team") == 0 else row.get("dire_team_id")
+        rows.append(
+            {
+                "match_id": mid,
+                "first_pick_team_id": first_pick_team,
+                "last_pick_team_id": last_pick_team,
+            }
+        )
+    return pl.DataFrame(rows, strict=False)
+
+
+def compute_adv_snapshots(
+    matches: pl.DataFrame,
+    raw_map: Dict[int, dict],
+    tracked_ids: List[int],
+    minutes: Sequence[int] = ADV_BUCKET_MINUTES,
+) -> pl.DataFrame:
+    """
+    Store per-team advantage snapshots (gold/xp) at selected minutes for quick lookup in Streamlit.
+    This replaces on-the-fly raw JSON parsing in the dashboard.
+    """
+    rows = []
+    for row in matches.iter_rows(named=True):
+        match_id = row.get("match_id")
+        rad_id = row.get("radiant_team_id")
+        dire_id = row.get("dire_team_id")
+        raw = raw_map.get(match_id)
+        if raw is None or rad_id is None or dire_id is None:
+            continue
+        gold_adv = _parse_adv(raw.get("radiant_gold_adv"))
+        xp_adv = _parse_adv(raw.get("radiant_xp_adv"))
+        for team_id, opp_id, is_rad in (
+            (rad_id, dire_id, True),
+            (dire_id, rad_id, False),
+        ):
+            if team_id not in tracked_ids:
+                continue
+            for minute in minutes:
+                idx_gold = min(minute, len(gold_adv) - 1) if gold_adv else None
+                idx_xp = min(minute, len(xp_adv) - 1) if xp_adv else None
+                if idx_gold is None and idx_xp is None:
+                    continue
+                gold_val = gold_adv[idx_gold] if idx_gold is not None else None
+                xp_val = xp_adv[idx_xp] if idx_xp is not None else None
+                gold_team_adv = gold_val if is_rad else (-gold_val if gold_val is not None else None)
+                xp_team_adv = xp_val if is_rad else (-xp_val if xp_val is not None else None)
+                rows.append(
+                    {
+                        "match_id": match_id,
+                        "team_id": team_id,
+                        "opponent_id": opp_id,
+                        "team_is_radiant": is_rad,
+                        "minute": minute,
+                        "gold_adv": gold_team_adv,
+                        "gold_bucket": _bucketize_adv(gold_team_adv) if gold_team_adv is not None else None,
+                        "xp_adv": xp_team_adv,
+                        "xp_bucket": _bucketize_adv(xp_team_adv) if xp_team_adv is not None else None,
+                        "start_time": row.get("start_time"),
+                    }
+                )
+    return pl.DataFrame(rows, strict=False)
+
+
 def compute_adv_buckets(
     matches: pl.DataFrame,
     raw_map: Dict[int, dict],
     tracked_ids: List[int],
     key: str,
-    minutes: Sequence[int] = (5, 10, 12, 15, 20),
+    minutes: Sequence[int] = ADV_BUCKET_MINUTES,
 ) -> pl.DataFrame:
     """Compute winrate by bucket for a given advantage key (radiant_gold_adv or radiant_xp_adv)."""
     rows = []
-    buckets = [-10_000, -5_000, -1_000, 0, 1_000, 5_000, 10_000, 999_999]
-
-    def bucketize(val: float) -> str:
-        for i in range(len(buckets) - 1):
-            if buckets[i] <= val < buckets[i + 1]:
-                return f"[{buckets[i]/1000:.0f}k,{buckets[i+1]/1000:.0f}k)"
-        return f">={buckets[-2]/1000:.0f}k"
 
     for row in matches.iter_rows(named=True):
         match_id = row.get("match_id")
@@ -526,7 +605,7 @@ def compute_adv_buckets(
                 if idx is None or idx < 0:
                     continue
                 adv = adv_array[idx] if is_rad else -adv_array[idx]
-                bucket = bucketize(adv)
+                bucket = _bucketize_adv(adv)
                 team_win = radiant_win if is_rad else (1 - int(radiant_win))
                 rows.append(
                     {
@@ -679,6 +758,7 @@ def main():
         raise FileNotFoundError(f"Raw file not found: {raw_path}")
     raw_data = json.loads(raw_path.read_text())
     raw_map = {item["json"]["match_id"]: item["json"] for item in raw_data}
+    draft_meta = compute_draft_meta(matches_raw, raw_map)
 
     elo_hist, elo_latest = compute_elo(
         matches_raw.select(
@@ -693,8 +773,9 @@ def main():
     elo_latest = elo_latest.with_columns(pl.col("elo").rank(method="dense", descending=True).alias("elo_rank"))
     firsts = compute_firsts(matches_raw, objectives, tables["players"], tracked_ids=team_ids)
     roshan = compute_roshan_metrics(matches_raw, objectives, tracked_ids=team_ids)
-    gold_buckets = compute_adv_buckets(matches_raw, raw_map=raw_map, tracked_ids=team_ids, key="radiant_gold_adv", minutes=(5, 10, 12, 15, 20))
-    xp_buckets = compute_adv_buckets(matches_raw, raw_map=raw_map, tracked_ids=team_ids, key="radiant_xp_adv", minutes=(5, 10, 12, 15, 20))
+    gold_buckets = compute_adv_buckets(matches_raw, raw_map=raw_map, tracked_ids=team_ids, key="radiant_gold_adv", minutes=ADV_BUCKET_MINUTES)
+    xp_buckets = compute_adv_buckets(matches_raw, raw_map=raw_map, tracked_ids=team_ids, key="radiant_xp_adv", minutes=ADV_BUCKET_MINUTES)
+    adv_snapshots = compute_adv_snapshots(matches_raw, raw_map=raw_map, tracked_ids=team_ids, minutes=ADV_BUCKET_MINUTES)
     series_maps, series_team_stats = compute_series_maps(matches_raw, tracked_ids=team_ids)
     pick_outcomes = compute_pick_outcomes(matches_raw, objectives, tables["players"], raw_map=raw_map, tracked_ids=team_ids)
 
@@ -708,6 +789,8 @@ def main():
     series_maps.write_parquet(out_dir / "series_maps.parquet")
     series_team_stats.write_parquet(out_dir / "series_team_stats.parquet")
     pick_outcomes.write_parquet(out_dir / "pick_outcomes.parquet")
+    draft_meta.write_parquet(out_dir / "draft_meta.parquet")
+    adv_snapshots.write_parquet(out_dir / "adv_snapshots.parquet")
 
     print("Metrics written:")
     print(f"- Elo history: {out_dir / 'elo_timeseries.parquet'} ({elo_hist.shape})")
@@ -720,6 +803,8 @@ def main():
     print(f"- Series maps: {out_dir / 'series_maps.parquet'} ({series_maps.shape})")
     print(f"- Series team stats: {out_dir / 'series_team_stats.parquet'} ({series_team_stats.shape})")
     print(f"- Pick outcomes: {out_dir / 'pick_outcomes.parquet'} ({pick_outcomes.shape})")
+    print(f"- Draft meta: {out_dir / 'draft_meta.parquet'} ({draft_meta.shape})")
+    print(f"- Advantage snapshots: {out_dir / 'adv_snapshots.parquet'} ({adv_snapshots.shape})")
 
 
 if __name__ == "__main__":

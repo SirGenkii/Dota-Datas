@@ -56,6 +56,8 @@ Generates:
 - `gold_buckets.parquet`, `xp_buckets.parquet`
 - `series_maps.parquet`, `series_team_stats.parquet`
 - `tracked_teams.parquet`
+- `draft_meta.parquet` (first/last pick team per match)
+- `adv_snapshots.parquet` (gold/xp advantage snapshot per tracked team & minute)
 
 ### 4) Analysis notebooks
 - `01_data_overview.ipynb`, `02_match_flow.ipynb`, `03_hero_lane.ipynb`, `05_dictionaries.ipynb` use processed parquet.
@@ -88,5 +90,5 @@ streamlit run app/dashboard_streamlit.py
 
 ## Notes
 - Ensure `OPENDOTA_KEY` is set in `.env` for scraping.
-- Precompute relies on both processed parquet and raw JSON for gold/xp advantages.
+- Precompute relies on both processed parquet and raw JSON for gold/xp advantages, but Streamlit dashboards now load only the parquet outputs (no raw JSON at runtime).
 - Series mapping uses `series_type`: 0=BO1, 1=BO3, 2=BO5, 3=BO2.
