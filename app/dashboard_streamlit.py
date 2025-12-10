@@ -33,11 +33,32 @@ PROCESSED_DIR_DEFAULT = Path("data/processed")
 METRICS_DIR_DEFAULT = Path("data/metrics")
 TEAMS_CSV_DEFAULT = Path("data/teams_to_look.csv")
 COMPARE_PATH = Path("data/interim/compare_list.csv")
+ALIASES_PATH = Path("data/team_aliases.csv")
 
 
 @st.cache_data(show_spinner=False)
 def load_tables(processed_dir: Path):
-    return read_processed_tables(processed_dir)
+    """
+    Load trimmed tables to reduce RAM usage.
+    Only select columns needed for the dashboard.
+    """
+    matches_path = processed_dir / "matches.parquet"
+    objectives_path = processed_dir / "objectives.parquet"
+    players_path = processed_dir / "players.parquet"
+
+    def scan_select(path: Path, cols: list[str]) -> pl.DataFrame:
+        lf = pl.scan_parquet(path)
+        present = [c for c in cols if c in lf.columns]
+        return lf.select(present).collect()
+
+    matches = scan_select(
+        matches_path,
+        ["match_id", "start_time", "radiant_team_id", "dire_team_id", "radiant_win", "radiant_name", "dire_name", "series_type", "series_id", "map_num"],
+    )
+    objectives = scan_select(objectives_path, ["match_id", "type", "time", "key", "team", "slot", "player_slot"])
+    players = scan_select(players_path, ["match_id", "is_radiant", "firstblood_claimed"])
+
+    return {"matches": matches, "objectives": objectives, "players": players}
 
 
 @st.cache_data(show_spinner=False)
@@ -64,6 +85,15 @@ def load_metrics(metrics_dir: Path):
 
 
 def load_team_options(teams_dict: pl.DataFrame, tracked_names: Optional[pl.DataFrame], teams_csv: Path) -> pl.DataFrame:
+    # map aliases if alias file exists
+    alias_map = {}
+    if ALIASES_PATH.exists():
+        try:
+            df_alias = pl.read_csv(ALIASES_PATH)
+            alias_map = {int(r["alias_team_id"]): int(r["canonical_team_id"]) for r in df_alias.iter_rows(named=True)}
+        except Exception:
+            alias_map = {}
+
     # Base lookup: unique team_id -> first non-null name/logo
     base = (
         teams_dict.group_by("team_id")
@@ -73,11 +103,14 @@ def load_team_options(teams_dict: pl.DataFrame, tracked_names: Optional[pl.DataF
         )
         .filter(pl.col("team_id").is_not_null())
     )
+    if alias_map:
+        base = base.with_columns(pl.col("team_id").replace(alias_map).alias("team_id"))
     if tracked_names is not None and not tracked_names.is_empty():
-        # Merge names from tracked, keep logos from base when available
         tracked = tracked_names
         if "logo_url" not in tracked.columns:
             tracked = tracked.with_columns(pl.lit(None).alias("logo_url"))
+        if alias_map:
+            tracked = tracked.with_columns(pl.col("team_id").replace(alias_map).alias("team_id"))
         merged = tracked.join(base, on="team_id", how="left", suffix="_base")
         merged = merged.with_columns(
             [
@@ -85,12 +118,12 @@ def load_team_options(teams_dict: pl.DataFrame, tracked_names: Optional[pl.DataF
                 pl.coalesce(pl.col("logo_url"), pl.col("logo_url_base")).alias("logo_url"),
             ]
         ).select(["team_id", "name", "logo_url"])
-        return merged.sort("name")
+        return merged.unique(subset=["team_id"]).sort("name")
     if teams_csv.exists():
         lookup = pl.read_csv(teams_csv)
         lookup_ids = lookup["TeamID"].to_list()
-        return base.filter(pl.col("team_id").is_in(lookup_ids)).sort("name")
-    return base.sort("name")
+        base = base.filter(pl.col("team_id").is_in(lookup_ids))
+    return base.unique(subset=["team_id"]).sort("name")
 
 
 def load_compare_list(path: Path) -> pd.DataFrame:
@@ -711,7 +744,7 @@ def main():
     with st.expander("Saved teams (overall outcomes)", expanded=False):
         add_c1, add_c2 = st.columns([3, 1], vertical_alignment="bottom")
         with add_c1:
-            compare_choice = st.selectbox("Add team", team_options, key="compare_add_team")
+            compare_choices = st.multiselect("Add teams", team_options, key="compare_add_team")
         with add_c2:
             add_clicked = st.button("Add", key="compare_add_btn")
 
@@ -737,18 +770,17 @@ def main():
                 "matches": r.get("matches"),
             }
 
-        if add_clicked and compare_choice:
-            sel_row = team_names_df.filter(pl.col("name") == compare_choice)
-            if not sel_row.is_empty():
+        if add_clicked and compare_choices:
+            for choice in compare_choices:
+                sel_row = team_names_df.filter(pl.col("name") == choice)
+                if sel_row.is_empty():
+                    continue
                 tid = sel_row["team_id"][0]
-                new_row = get_overall_row(tid, compare_choice)
+                new_row = get_overall_row(tid, choice)
                 if new_row:
-                    if compare_df.empty:
-                        compare_df = pd.DataFrame([new_row])
-                    else:
-                        compare_df = compare_df[compare_df["team_id"] != tid]
-                        compare_df = pd.concat([compare_df, pd.DataFrame([new_row])], ignore_index=True)
-                    save_compare_list(compare_df, ROOT / COMPARE_PATH)
+                    compare_df = compare_df[compare_df["team_id"] != tid] if not compare_df.empty else compare_df
+                    compare_df = pd.concat([compare_df, pd.DataFrame([new_row])], ignore_index=True) if not compare_df.empty else pd.DataFrame([new_row])
+            save_compare_list(compare_df, ROOT / COMPARE_PATH)
 
         if not compare_df.empty:
             display_df = compare_df.copy()

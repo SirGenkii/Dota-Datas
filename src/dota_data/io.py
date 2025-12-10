@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional
 
 import polars as pl
 
@@ -40,12 +40,46 @@ def load_raw_matches(path: Path | str) -> List[Dict[str, Any]]:
         return json.load(f)
 
 
-def matches_table(raw: Iterable[Dict[str, Any]]) -> pl.DataFrame:
+def load_alias_map(path: Optional[Path]) -> Dict[int, int]:
+    """Load alias->canonical mapping from CSV with columns alias_team_id,canonical_team_id."""
+    mapping: Dict[int, int] = {}
+    if path is None or not path.exists():
+        return mapping
+    try:
+        df = pl.read_csv(path)
+    except Exception:
+        return mapping
+    if not {"alias_team_id", "canonical_team_id"}.issubset(set(df.columns)):
+        return mapping
+    for row in df.iter_rows(named=True):
+        try:
+            alias = int(row["alias_team_id"])
+            canon = int(row["canonical_team_id"])
+            if alias != canon:
+                mapping[alias] = canon
+        except Exception:
+            continue
+    return mapping
+
+
+def _map_team_id(team_id: Any, alias_map: Dict[int, int]) -> Any:
+    try:
+        tid = int(team_id)
+    except Exception:
+        return team_id
+    return alias_map.get(tid, tid)
+
+
+def matches_table(raw: Iterable[Dict[str, Any]], alias_map: Optional[Dict[int, int]] = None) -> pl.DataFrame:
     """Flatten match-level info (no heavy nested arrays)."""
+    alias_map = alias_map or {}
     rows: List[Dict[str, Any]] = []
     for entry in raw:
         match = entry.get("json", {})
         row = {k: _serialize_value(v) for k, v in match.items() if k not in EXCLUDED_MATCH_KEYS}
+        # Map team ids to canonical if provided
+        row["radiant_team_id"] = _map_team_id(row.get("radiant_team_id"), alias_map)
+        row["dire_team_id"] = _map_team_id(row.get("dire_team_id"), alias_map)
         row["players_count"] = len(match.get("players", []))
         row["objectives_count"] = len(match.get("objectives", []))
         row["teamfights_count"] = len(match.get("teamfights", []))
@@ -144,14 +178,15 @@ def summarize_raw(raw: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def write_parquet_tables(raw_path: Path | str, output_dir: Path | str) -> Dict[str, Path]:
+def write_parquet_tables(raw_path: Path | str, output_dir: Path | str, alias_path: Optional[Path] = None) -> Dict[str, Path]:
     """Generate parquet tables for matches, players, objectives, and teamfights."""
     raw = load_raw_matches(raw_path)
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    alias_map = load_alias_map(alias_path)
 
     tables = {
-        "matches": matches_table(raw),
+        "matches": matches_table(raw, alias_map=alias_map),
         "players": players_table(raw),
         "objectives": objectives_table(raw),
         "teamfights": teamfights_table(raw),
@@ -171,9 +206,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convert raw Dota matches JSON to parquet tables.")
     parser.add_argument("--raw", default="data/raw/data.json", help="Path to raw JSON file.")
     parser.add_argument("--out", default="data/processed", help="Output directory for parquet tables.")
+    parser.add_argument("--aliases", default="data/team_aliases.csv", help="CSV file mapping alias_team_id -> canonical_team_id.")
     args = parser.parse_args()
 
-    paths = write_parquet_tables(args.raw, args.out)
+    alias_path = Path(args.aliases) if args.aliases else None
+    paths = write_parquet_tables(args.raw, args.out, alias_path=alias_path)
     print("Parquet tables written:")
     for name, path in paths.items():
         print(f"- {name}: {path}")

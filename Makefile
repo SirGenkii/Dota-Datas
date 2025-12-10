@@ -25,8 +25,9 @@ deps-clean:
 # Usage: make parquet [RAW=path/to/raw.json] [OUT=path/to/processed_dir]
 RAW ?= data/raw/data_v2.json
 OUT ?= data/processed
+ALIASES ?= data/team_aliases.csv
 parquet: install
-	$(PYTHON) -m src.dota_data.io --raw $(RAW) --out $(OUT)
+	$(PYTHON) -m src.dota_data.io --raw $(RAW) --out $(OUT) --aliases $(ALIASES)
 
 # Pré-calcul des métriques (Elo, firsts) à partir des parquets
 METRICS_OUT ?= data/metrics
