@@ -184,7 +184,7 @@ def durations_for_team(matches: pl.DataFrame, team_id: int) -> Optional[np.ndarr
     return np.array(vals, dtype=float) / 60.0
 
 
-def duration_bucket_stats(durations: np.ndarray, thresholds: list[int]):
+def duration_bucket_stats(durations: np.ndarray, thresholds: list[int], overs: Optional[list[int]] = None):
     """Return bucket percentages and over-X percentages for selected thresholds."""
     if durations is None or len(durations) == 0:
         return {"buckets": [], "overs": []}
@@ -193,8 +193,9 @@ def duration_bucket_stats(durations: np.ndarray, thresholds: list[int]):
     counts, _ = np.histogram(durations, bins=edges)
     total = len(durations)
     bucket_stats = [{"label": lbl, "pct": (c / total) if total else 0.0, "count": int(c)} for lbl, c in zip(labels, counts)]
-    overs = [{"label": f">{t} min", "pct": float(np.mean(durations > t)), "threshold": t} for t in thresholds]
-    return {"buckets": bucket_stats, "overs": overs}
+    overs_to_use = overs if overs is not None else thresholds
+    overs_stats = [{"label": f">{t} min", "pct": float(np.mean(durations > t)), "threshold": t} for t in overs_to_use]
+    return {"buckets": bucket_stats, "overs": overs_stats}
 
 
 def compute_rank_window_metrics(
@@ -959,11 +960,25 @@ def team_block(
     if durations is None or len(durations) == 0:
         st.info("No duration data for this team.")
     else:
-        thresholds = [20, 25, 30, 35, 40]
-        dist_stats = duration_bucket_stats(durations, thresholds)
+        thresholds = [20, 30, 40, 50 ,60]
+        overs_focus = [30, 40, 50, 60]
+        dist_stats = duration_bucket_stats(durations, thresholds, overs=overs_focus)
         mean = float(np.mean(durations))
         std = float(np.std(durations))
         st.metric("Average duration", f"{mean:.1f} min", help=f"{int(len(durations))} matches")
+
+        # Key zones
+        key_cols = st.columns(4)
+        key_values = {
+            "<20": float(np.mean(durations < 20)),
+            ">30": float(np.mean(durations > 30)),
+            ">40": float(np.mean(durations > 40)),
+            ">60": float(np.mean(durations > 60)),
+        }
+        for col, (lbl, pct) in zip(key_cols, key_values.items()):
+            with col:
+                st.markdown(f"**{lbl}**")
+                st.caption(f"{pct*100:.1f}% of games")
 
         # Buckets view
         bucket_cols = st.columns(len(dist_stats["buckets"]))
@@ -972,54 +987,54 @@ def team_block(
                 st.markdown(f"**{b['label']}**")
                 st.caption(f"{b['pct']*100:.1f}% ({b['count']} games)")
 
-        # Over-threshold quick view
-        over_rows = [{"Over": o["label"], "Share": f"{o['pct']*100:.1f}%"} for o in dist_stats["overs"]]
-        st.dataframe(pd.DataFrame(over_rows), use_container_width=True, hide_index=True)
+        # # Over-threshold quick view
+        # over_rows = [{"Over": o["label"], "Share": f"{o['pct']*100:.1f}%"} for o in dist_stats["overs"]]
+        # st.dataframe(pd.DataFrame(over_rows), use_container_width=True, hide_index=True)
 
-        # Histogram + Gaussian overlay so something is always visible
-        bins = 25
-        hist, edges = np.histogram(durations, bins=bins, density=True)
-        hist_df = pd.DataFrame({"duration_min": edges[:-1], "density": hist})
-        charts = []
-        hist_chart = (
-            alt.Chart(hist_df)
-            .mark_bar(opacity=0.4)
-            .encode(
-                x=alt.X("duration_min:Q", bin=alt.Bin(binned=True, step=(edges[1] - edges[0])), title="Match duration (min)"),
-                y=alt.Y("density:Q", title="Density"),
-                tooltip=[alt.Tooltip("duration_min:Q", format=".1f"), alt.Tooltip("density:Q", format=".3f")],
-            )
-        )
-        charts.append(hist_chart)
-        if std > 0:
-            x_min = max(0.0, float(np.min(durations)) - 5)
-            x_max = float(np.max(durations)) + 5
-            x_vals = np.linspace(x_min, x_max, 200)
-            pdf = (1 / (std * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x_vals - mean) / std) ** 2)
-            gauss_df = pd.DataFrame({"duration_min": x_vals, "pdf": pdf})
-            gauss_chart = (
-                alt.Chart(gauss_df)
-                .mark_line(color="firebrick", strokeWidth=2)
-                .encode(
-                    x=alt.X("duration_min:Q", title="Match duration (min)"),
-                    y=alt.Y("pdf:Q", title="Density"),
-                    tooltip=[alt.Tooltip("duration_min:Q", format=".1f"), alt.Tooltip("pdf:Q", format=".3f")],
-                )
-            )
-            charts.append(gauss_chart)
-        # Threshold markers
-        rules_df = pd.DataFrame({"duration_min": thresholds, "label": [f"{t} min" for t in thresholds]})
-        rule_chart = (
-            alt.Chart(rules_df)
-            .mark_rule(color="gray", strokeDash=[4, 4])
-            .encode(x="duration_min:Q", tooltip=["label"])
-        )
-        charts.append(rule_chart)
+        # # Histogram + Gaussian overlay so something is always visible
+        # bins = 25
+        # hist, edges = np.histogram(durations, bins=bins, density=True)
+        # hist_df = pd.DataFrame({"duration_min": edges[:-1], "density": hist})
+        # charts = []
+        # hist_chart = (
+        #     alt.Chart(hist_df)
+        #     .mark_bar(opacity=0.4)
+        #     .encode(
+        #         x=alt.X("duration_min:Q", bin=alt.Bin(binned=True, step=(edges[1] - edges[0])), title="Match duration (min)"),
+        #         y=alt.Y("density:Q", title="Density"),
+        #         tooltip=[alt.Tooltip("duration_min:Q", format=".1f"), alt.Tooltip("density:Q", format=".3f")],
+        #     )
+        # )
+        # charts.append(hist_chart)
+        # if std > 0:
+        #     x_min = max(0.0, float(np.min(durations)) - 5)
+        #     x_max = float(np.max(durations)) + 5
+        #     x_vals = np.linspace(x_min, x_max, 200)
+        #     pdf = (1 / (std * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x_vals - mean) / std) ** 2)
+        #     gauss_df = pd.DataFrame({"duration_min": x_vals, "pdf": pdf})
+        #     gauss_chart = (
+        #         alt.Chart(gauss_df)
+        #         .mark_line(color="firebrick", strokeWidth=2)
+        #         .encode(
+        #             x=alt.X("duration_min:Q", title="Match duration (min)"),
+        #             y=alt.Y("pdf:Q", title="Density"),
+        #             tooltip=[alt.Tooltip("duration_min:Q", format=".1f"), alt.Tooltip("pdf:Q", format=".3f")],
+        #         )
+        #     )
+        #     charts.append(gauss_chart)
+        # # Threshold markers
+        # rules_df = pd.DataFrame({"duration_min": thresholds, "label": [f"{t} min" for t in thresholds]})
+        # rule_chart = (
+        #     alt.Chart(rules_df)
+        #     .mark_rule(color="gray", strokeDash=[4, 4])
+        #     .encode(x="duration_min:Q", tooltip=["label"])
+        # )
+        # charts.append(rule_chart)
 
-        combo = charts[0]
-        for ch in charts[1:]:
-            combo = combo + ch
-        st.altair_chart(combo, use_container_width=True)
+        # combo = charts[0]
+        # for ch in charts[1:]:
+        #     combo = combo + ch
+        # st.altair_chart(combo, use_container_width=True)
 
 
 def main():
