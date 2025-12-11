@@ -197,6 +197,212 @@ def duration_bucket_stats(durations: np.ndarray, thresholds: list[int]):
     return {"buckets": bucket_stats, "overs": overs}
 
 
+def compute_rank_window_metrics(
+    team_id: int,
+    matches: pl.DataFrame,
+    objectives: pl.DataFrame,
+    players: pl.DataFrame,
+    draft_meta: Optional[pl.DataFrame],
+    elo_latest: Optional[pl.DataFrame],
+    target_rank: Optional[float],
+    rank_window: int,
+    include_opponent: bool,
+    opponent_team_id: Optional[int],
+) -> Optional[pl.DataFrame]:
+    """
+    Aggregate pick/outcome metrics for a team vs opponents whose elo_rank is within target_rank ± rank_window.
+    If include_opponent is False, exclude matches vs opponent_team_id even if they fall in the window.
+    """
+    if target_rank is None or elo_latest is None or elo_latest.is_empty():
+        return None
+    if matches is None or matches.is_empty():
+        return None
+    rank_map = {int(r["team_id"]): r.get("elo_rank") for r in elo_latest.iter_rows(named=True) if r.get("team_id") is not None}
+    draft_lookup = {}
+    if draft_meta is not None and not draft_meta.is_empty():
+        draft_lookup = {int(r["match_id"]): (r.get("first_pick_team_id"), r.get("last_pick_team_id")) for r in draft_meta.iter_rows(named=True)}
+
+    match_rows = []
+    for r in matches.iter_rows(named=True):
+        tid_rad = r.get("radiant_team_id")
+        tid_dire = r.get("dire_team_id")
+        if tid_rad is None or tid_dire is None:
+            continue
+        if tid_rad == team_id:
+            opp_id = tid_dire
+            team_is_radiant = True
+        elif tid_dire == team_id:
+            opp_id = tid_rad
+            team_is_radiant = False
+        else:
+            continue
+        opp_rank = rank_map.get(int(opp_id)) if opp_id is not None else None
+        if opp_rank is None:
+            continue
+        if not (target_rank - rank_window <= opp_rank <= target_rank + rank_window):
+            continue
+        if not include_opponent and opponent_team_id is not None and opp_id == opponent_team_id:
+            continue
+        match_rows.append({**r, "team_is_radiant": team_is_radiant, "opp_id": opp_id})
+
+    if not match_rows:
+        return None
+
+    match_ids = [r["match_id"] for r in match_rows if r.get("match_id") is not None]
+    obj = objectives.filter(pl.col("match_id").is_in(match_ids))
+    fb_map = (
+        players.filter((pl.col("match_id").is_in(match_ids)) & (pl.col("firstblood_claimed") == 1))
+        .select("match_id", "is_radiant")
+        .group_by("match_id")
+        .agg(pl.first("is_radiant").alias("fb_is_radiant"))
+    )
+    fb_map = {int(r["match_id"]): r["fb_is_radiant"] for r in fb_map.iter_rows(named=True)}
+
+    towers = obj.filter(pl.col("type") == "building_kill").with_columns(
+        pl.when(pl.col("key").str.contains("goodguys")).then(True)
+        .when(pl.col("key").str.contains("badguys")).then(False)
+        .otherwise(None)
+        .alias("building_is_radiant")
+    )
+    first_tower = (
+        towers.sort(["match_id", "time"])
+        .group_by("match_id")
+        .agg(pl.first("building_is_radiant").alias("building_is_radiant"))
+    )
+    ft_map = {int(r["match_id"]): r["building_is_radiant"] for r in first_tower.iter_rows(named=True)}
+
+    first_rosh_map: Dict[int, Optional[str]] = {}
+    steals_map: Dict[int, Tuple[int, int]] = {}
+    obj_groups = obj.partition_by("match_id", as_dict=True, maintain_order=True)
+    for key, df in obj_groups.items():
+        mid = key[0] if isinstance(key, tuple) else key
+        try:
+            mid = int(mid)
+        except Exception:  # noqa: BLE001
+            continue
+        obj_list = df.to_dicts()
+        rosh_kills = [o for o in obj_list if o.get("type") == "CHAT_MESSAGE_ROSHAN_KILL"]
+        rosh_sides = []
+        for o in rosh_kills:
+            team_val = o.get("team")
+            if team_val == 2:
+                rosh_sides.append("radiant")
+            elif team_val == 3:
+                rosh_sides.append("dire")
+        first_rosh_map[mid] = rosh_sides[0] if rosh_sides else None
+
+        aegis_claims = [o for o in obj_list if o.get("type") == "CHAT_MESSAGE_AEGIS"]
+        steals_rad = steals_dire = 0
+        if rosh_kills and aegis_claims:
+            aeg_iter = iter(sorted(aegis_claims, key=lambda x: x.get("time", 0)))
+            current_aeg = next(aeg_iter, None)
+            for rk in sorted(rosh_kills, key=lambda x: x.get("time", 0)):
+                while current_aeg is not None and current_aeg.get("time", 0) < rk.get("time", 0):
+                    current_aeg = next(aeg_iter, None)
+                if current_aeg is None:
+                    break
+                rk_side = "radiant" if rk.get("team") == 2 else "dire"
+                aeg_side = "radiant" if (current_aeg.get("slot", 10) < 5 or (current_aeg.get("player_slot", 200) < 128)) else "dire"
+                if rk_side != aeg_side:
+                    if aeg_side == "radiant":
+                        steals_rad += 1
+                    else:
+                        steals_dire += 1
+                current_aeg = next(aeg_iter, None)
+        steals_map[mid] = (steals_rad, steals_dire)
+
+    rows = []
+    for r in match_rows:
+        mid = r.get("match_id")
+        rad_id = r.get("radiant_team_id")
+        dire_id = r.get("dire_team_id")
+        radiant_win = r.get("radiant_win")
+        if None in (mid, rad_id, dire_id, radiant_win):
+            continue
+        team_is_radiant = r.get("team_is_radiant")
+        first_pick_team = last_pick_team = None
+        draft_vals = draft_lookup.get(mid)
+        if draft_vals:
+            first_pick_team, last_pick_team = draft_vals
+
+        fb_is_rad = fb_map.get(mid)
+        ft_building_is_rad = ft_map.get(mid)
+        fr_side = first_rosh_map.get(mid)
+        steals_rad, steals_dire = steals_map.get(mid, (None, None))
+
+        win = radiant_win if team_is_radiant else (1 - int(radiant_win))
+        fb_hit = fb_is_rad == team_is_radiant if fb_is_rad is not None else None
+        ft_hit = (ft_building_is_rad is not None and ft_building_is_rad != team_is_radiant)
+        ft_hit = ft_hit if ft_building_is_rad is not None else None
+        if fr_side is None:
+            fr_hit = None
+        else:
+            fr_hit = (fr_side == "radiant") == team_is_radiant
+        combo_for = combo_against = None
+        if fb_hit is not None and ft_hit is not None and fr_hit is not None:
+            combo_for = bool(fb_hit and ft_hit and fr_hit and win)
+            combo_against = bool((not fb_hit) and (not ft_hit) and (not fr_hit) and (not win))
+
+        steal_for = None
+        steal_against = None
+        if steals_rad is not None and steals_dire is not None:
+            steal_for = (steals_rad if team_is_radiant else steals_dire) > 0
+            steal_against = (steals_dire if team_is_radiant else steals_rad) > 0
+
+        rows.append(
+            {
+                "team_id": team_id,
+                "team_is_radiant": team_is_radiant,
+                "is_first_pick": first_pick_team == team_id if first_pick_team is not None else None,
+                "is_last_pick": last_pick_team == team_id if last_pick_team is not None else None,
+                "win": win,
+                "first_blood": fb_hit,
+                "first_tower": ft_hit,
+                "first_roshan": fr_hit,
+                "combo_for": combo_for,
+                "combo_against": combo_against,
+                "aegis_steal_for": steal_for,
+                "aegis_steal_against": steal_against,
+                "match_id": mid,
+                "opp_id": r.get("opp_id"),
+            }
+        )
+
+    if not rows:
+        return None
+
+    df = pl.DataFrame(rows, strict=False)
+    labels = [
+        ("overall", None),
+        ("radiant_first_pick", (pl.col("team_is_radiant") & pl.col("is_first_pick"))),
+        ("radiant_last_pick", (pl.col("team_is_radiant") & pl.col("is_last_pick"))),
+        ("dire_first_pick", (~pl.col("team_is_radiant") & pl.col("is_first_pick"))),
+        ("dire_last_pick", (~pl.col("team_is_radiant") & pl.col("is_last_pick"))),
+    ]
+
+    out_rows = []
+    for label, mask in labels:
+        sub = df if mask is None else df.filter(mask)
+        if sub.is_empty():
+            continue
+        out_rows.append(
+            {
+                "label": label,
+                "matches": sub.height,
+                "winrate": sub["win"].mean(),
+                "first_blood_rate": sub["first_blood"].mean(),
+                "first_tower_rate": sub["first_tower"].mean(),
+                "first_roshan_rate": sub["first_roshan"].mean(),
+                "combo_for_rate": sub["combo_for"].mean(),
+                "combo_against_rate": sub["combo_against"].mean(),
+                "aegis_steal_rate": sub["aegis_steal_for"].mean(),
+                "aegis_steal_against_rate": sub["aegis_steal_against"].mean(),
+            }
+        )
+
+    return pl.DataFrame(out_rows, strict=False)
+
+
 def recent_matches_for_bucket(
     team_id: int,
     team_name: str,
@@ -1057,6 +1263,72 @@ def main():
                 render_h2h_table(h2h["team_a"], team_a)
             with colB:
                 render_h2h_table(h2h["team_b"], team_b)
+
+            # Similar-level outcomes (rank window)
+            elo_latest = metrics.get("elo_latest")
+            rank_map = {}
+            if elo_latest is not None and "elo_rank" in elo_latest.columns:
+                rank_map = {int(r["team_id"]): r.get("elo_rank") for r in elo_latest.iter_rows(named=True) if r.get("team_id") is not None}
+            rank_a = rank_map.get(team_a_id) if team_a_id is not None else None
+            rank_b = rank_map.get(team_b_id) if team_b_id is not None else None
+
+            st.subheader("Score vs teams of similar level")
+            rank_window = st.slider("Rank window (±)", min_value=1, max_value=20, value=5, step=1, key="rank_window_similar")
+            include_opponent = st.checkbox("Include current opponent in similar-level stats", value=True, key="include_opponent_similar")
+
+            id_to_name = {}
+            if team_names_df is not None and not team_names_df.is_empty():
+                id_to_name = {int(r["team_id"]): r.get("name") for r in team_names_df.iter_rows(named=True) if r.get("team_id") is not None}
+
+            def render_similar_table(team_label: str, team_id_val: Optional[int], target_rank: Optional[float], opponent_id: Optional[int]):
+                if team_id_val is None or target_rank is None:
+                    st.info(f"No rank data for {team_label}.")
+                    return
+                df_sim = compute_rank_window_metrics(
+                    team_id_val,
+                    matches_raw,
+                    objectives,
+                    tables["players"],
+                    metrics.get("draft_meta"),
+                    elo_latest,
+                    target_rank=target_rank,
+                    rank_window=rank_window,
+                    include_opponent=include_opponent,
+                    opponent_team_id=opponent_id,
+                )
+                # List eligible teams for the window
+                eligible = []
+                if elo_latest is not None and not elo_latest.is_empty():
+                    for r in elo_latest.iter_rows(named=True):
+                        tid = r.get("team_id")
+                        trk = r.get("elo_rank")
+                        if tid is None or trk is None:
+                            continue
+                        if not (target_rank - rank_window <= trk <= target_rank + rank_window):
+                            continue
+                        if not include_opponent and opponent_id is not None and tid == opponent_id:
+                            continue
+                        name = id_to_name.get(int(tid)) or r.get("name") or str(tid)
+                        eligible.append((tid, name, trk))
+
+                matches_count = df_sim["matches"].sum() if df_sim is not None and not df_sim.is_empty() else 0
+                st.caption(f"{team_label} vs ranks [{target_rank-rank_window:.0f}, {target_rank+rank_window:.0f}] — {int(matches_count)} games")
+
+                if eligible:
+                    with st.expander("Teams in range", expanded=False):
+                        lines = [f"- {name} (rank {int(rank)})" for _, name, rank in sorted(eligible, key=lambda x: x[2])]
+                        st.markdown("\n".join(lines))
+
+                if df_sim is None or df_sim.is_empty():
+                    st.info("No similar-level matches.")
+                    return
+                render_h2h_table(df_sim, team_label)
+
+            col_sim_a, col_sim_b = st.columns(2)
+            with col_sim_a:
+                render_similar_table(team_a, team_a_id, rank_b, team_b_id)
+            with col_sim_b:
+                render_similar_table(team_b, team_b_id, rank_a, team_a_id)
 
             # Timeline of last matches
             timeline = h2h.get("timeline")
