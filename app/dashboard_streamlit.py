@@ -184,6 +184,47 @@ def durations_for_team(matches: pl.DataFrame, team_id: int) -> Optional[np.ndarr
     return np.array(vals, dtype=float) / 60.0
 
 
+def durations_for_team_in_rank_range(
+    team_id: int,
+    matches: pl.DataFrame,
+    elo_latest: Optional[pl.DataFrame],
+    rank_min: int,
+    rank_max: int,
+    include_opponent: bool,
+    opponent_team_id: Optional[int],
+) -> Optional[np.ndarray]:
+    """Durations (minutes) for matches of team_id vs opponents whose rank is in [rank_min, rank_max]."""
+    if matches is None or matches.is_empty() or "duration" not in matches.columns or elo_latest is None or elo_latest.is_empty():
+        return None
+    rank_map = {int(r["team_id"]): r.get("elo_rank") for r in elo_latest.iter_rows(named=True) if r.get("team_id") is not None}
+    durations = []
+    for r in matches.iter_rows(named=True):
+        tid_rad = r.get("radiant_team_id")
+        tid_dire = r.get("dire_team_id")
+        if tid_rad not in (team_id, tid_dire) and tid_dire not in (team_id, tid_rad):
+            continue
+        if tid_rad == team_id:
+            opp_id = tid_dire
+        elif tid_dire == team_id:
+            opp_id = tid_rad
+        else:
+            continue
+        if opp_id is None:
+            continue
+        opp_rank = rank_map.get(int(opp_id))
+        if opp_rank is None or not (rank_min <= opp_rank <= rank_max):
+            continue
+        if not include_opponent and opponent_team_id is not None and opp_id == opponent_team_id:
+            continue
+        dur = r.get("duration")
+        if dur is None:
+            continue
+        durations.append(float(dur) / 60.0)
+    if not durations:
+        return None
+    return np.array(durations, dtype=float)
+
+
 def duration_bucket_stats(durations: np.ndarray, thresholds: list[int], overs: Optional[list[int]] = None):
     """Return bucket percentages and over-X percentages for selected thresholds."""
     if durations is None or len(durations) == 0:
@@ -352,6 +393,210 @@ def compute_rank_window_metrics(
 
         rows.append(
             {
+                "team_id": team_id,
+                "team_is_radiant": team_is_radiant,
+                "is_first_pick": first_pick_team == team_id if first_pick_team is not None else None,
+                "is_last_pick": last_pick_team == team_id if last_pick_team is not None else None,
+                "win": win,
+                "first_blood": fb_hit,
+                "first_tower": ft_hit,
+                "first_roshan": fr_hit,
+                "combo_for": combo_for,
+                "combo_against": combo_against,
+                "aegis_steal_for": steal_for,
+                "aegis_steal_against": steal_against,
+                "match_id": mid,
+                "opp_id": r.get("opp_id"),
+            }
+        )
+
+    if not rows:
+        return None
+
+    df = pl.DataFrame(rows, strict=False)
+    labels = [
+        ("overall", None),
+        ("radiant_first_pick", (pl.col("team_is_radiant") & pl.col("is_first_pick"))),
+        ("radiant_last_pick", (pl.col("team_is_radiant") & pl.col("is_last_pick"))),
+        ("dire_first_pick", (~pl.col("team_is_radiant") & pl.col("is_first_pick"))),
+        ("dire_last_pick", (~pl.col("team_is_radiant") & pl.col("is_last_pick"))),
+    ]
+
+    out_rows = []
+    for label, mask in labels:
+        sub = df if mask is None else df.filter(mask)
+        if sub.is_empty():
+            continue
+        out_rows.append(
+            {
+                "label": label,
+                "matches": sub.height,
+                "winrate": sub["win"].mean(),
+                "first_blood_rate": sub["first_blood"].mean(),
+                "first_tower_rate": sub["first_tower"].mean(),
+                "first_roshan_rate": sub["first_roshan"].mean(),
+                "combo_for_rate": sub["combo_for"].mean(),
+                "combo_against_rate": sub["combo_against"].mean(),
+                "aegis_steal_rate": sub["aegis_steal_for"].mean(),
+                "aegis_steal_against_rate": sub["aegis_steal_against"].mean(),
+            }
+        )
+
+    return pl.DataFrame(out_rows, strict=False)
+
+
+def compute_rank_range_metrics(
+    team_id: int,
+    matches: pl.DataFrame,
+    objectives: pl.DataFrame,
+    players: pl.DataFrame,
+    draft_meta: Optional[pl.DataFrame],
+    elo_latest: Optional[pl.DataFrame],
+    rank_min: int,
+    rank_max: int,
+    include_opponent: bool,
+    opponent_team_id: Optional[int],
+) -> Optional[pl.DataFrame]:
+    """Aggregate pick/outcome metrics for a team vs opponents whose elo_rank is within [rank_min, rank_max]."""
+    if elo_latest is None or elo_latest.is_empty():
+        return None
+    if matches is None or matches.is_empty():
+        return None
+    rank_map = {int(r["team_id"]): r.get("elo_rank") for r in elo_latest.iter_rows(named=True) if r.get("team_id") is not None}
+    draft_lookup = {}
+    if draft_meta is not None and not draft_meta.is_empty():
+        draft_lookup = {int(r["match_id"]): (r.get("first_pick_team_id"), r.get("last_pick_team_id")) for r in draft_meta.iter_rows(named=True)}
+
+    match_rows = []
+    for r in matches.iter_rows(named=True):
+        tid_rad = r.get("radiant_team_id")
+        tid_dire = r.get("dire_team_id")
+        if tid_rad is None or tid_dire is None:
+            continue
+        if tid_rad == team_id:
+            opp_id = tid_dire
+            team_is_radiant = True
+        elif tid_dire == team_id:
+            opp_id = tid_rad
+            team_is_radiant = False
+        else:
+            continue
+        opp_rank = rank_map.get(int(opp_id)) if opp_id is not None else None
+        if opp_rank is None:
+            continue
+        if not (rank_min <= opp_rank <= rank_max):
+            continue
+        if not include_opponent and opponent_team_id is not None and opp_id == opponent_team_id:
+            continue
+        match_rows.append({**r, "team_is_radiant": team_is_radiant, "opp_id": opp_id})
+
+    if not match_rows:
+        return None
+
+    match_ids = [r["match_id"] for r in match_rows if r.get("match_id") is not None]
+    obj = objectives.filter(pl.col("match_id").is_in(match_ids))
+    fb_map = (
+        players.filter((pl.col("match_id").is_in(match_ids)) & (pl.col("firstblood_claimed") == 1))
+        .select("match_id", "is_radiant")
+        .group_by("match_id")
+        .agg(pl.first("is_radiant").alias("fb_is_radiant"))
+    )
+    fb_map = {int(r["match_id"]): r["fb_is_radiant"] for r in fb_map.iter_rows(named=True)}
+
+    towers = obj.filter(pl.col("type") == "building_kill").with_columns(
+        pl.when(pl.col("key").str.contains("goodguys")).then(True)
+        .when(pl.col("key").str.contains("badguys")).then(False)
+        .otherwise(None)
+        .alias("building_is_radiant")
+    )
+    first_tower = (
+        towers.sort(["match_id", "time"])
+        .group_by("match_id")
+        .agg(pl.first("building_is_radiant").alias("building_is_radiant"))
+    )
+    ft_map = {int(r["match_id"]): r["building_is_radiant"] for r in first_tower.iter_rows(named=True)}
+
+    first_rosh_map: Dict[int, Optional[str]] = {}
+    steals_map: Dict[int, Tuple[int, int]] = {}
+    obj_groups = obj.partition_by("match_id", as_dict=True, maintain_order=True)
+    for key, df in obj_groups.items():
+        mid = key[0] if isinstance(key, tuple) else key
+        try:
+            mid = int(mid)
+        except Exception:  # noqa: BLE001
+            continue
+        obj_list = df.to_dicts()
+        rosh_kills = [o for o in obj_list if o.get("type") == "CHAT_MESSAGE_ROSHAN_KILL"]
+        rosh_sides = []
+        for o in rosh_kills:
+            team_val = o.get("team")
+            if team_val == 2:
+                rosh_sides.append("radiant")
+            elif team_val == 3:
+                rosh_sides.append("dire")
+        first_rosh_map[mid] = rosh_sides[0] if rosh_sides else None
+
+        aegis_claims = [o for o in obj_list if o.get("type") == "CHAT_MESSAGE_AEGIS"]
+        steals_rad = steals_dire = 0
+        if rosh_kills and aegis_claims:
+            aeg_iter = iter(sorted(aegis_claims, key=lambda x: x.get("time", 0)))
+            current_aeg = next(aeg_iter, None)
+            for rk in sorted(rosh_kills, key=lambda x: x.get("time", 0)):
+                while current_aeg is not None and current_aeg.get("time", 0) < rk.get("time", 0):
+                    current_aeg = next(aeg_iter, None)
+                if current_aeg is None:
+                    break
+                rk_side = "radiant" if rk.get("team") == 2 else "dire"
+                aeg_side = "radiant" if (current_aeg.get("slot", 10) < 5 or (current_aeg.get("player_slot", 200) < 128)) else "dire"
+                if rk_side != aeg_side:
+                    if aeg_side == "radiant":
+                        steals_rad += 1
+                    else:
+                        steals_dire += 1
+                current_aeg = next(aeg_iter, None)
+        steals_map[mid] = (steals_rad, steals_dire)
+
+    rows = []
+    for r in match_rows:
+        mid = r.get("match_id")
+        rad_id = r.get("radiant_team_id")
+        dire_id = r.get("dire_team_id")
+        radiant_win = r.get("radiant_win")
+        if None in (mid, rad_id, dire_id, radiant_win):
+            continue
+        team_is_radiant = r.get("team_is_radiant")
+        first_pick_team = last_pick_team = None
+        draft_vals = draft_lookup.get(mid)
+        if draft_vals:
+            first_pick_team, last_pick_team = draft_vals
+
+        fb_is_rad = fb_map.get(mid)
+        ft_building_is_rad = ft_map.get(mid)
+        fr_side = first_rosh_map.get(mid)
+        steals_rad, steals_dire = steals_map.get(mid, (None, None))
+
+        win = radiant_win if team_is_radiant else (1 - int(radiant_win))
+        fb_hit = fb_is_rad == team_is_radiant if fb_is_rad is not None else None
+        ft_hit = (ft_building_is_rad is not None and ft_building_is_rad != team_is_radiant)
+        ft_hit = ft_hit if ft_building_is_rad is not None else None
+        if fr_side is None:
+            fr_hit = None
+        else:
+            fr_hit = (fr_side == "radiant") == team_is_radiant
+        combo_for = combo_against = None
+        if fb_hit is not None and ft_hit is not None and fr_hit is not None:
+            combo_for = bool(fb_hit and ft_hit and fr_hit and win)
+            combo_against = bool((not fb_hit) and (not ft_hit) and (not fr_hit) and (not win))
+
+        steal_for = None
+        steal_against = None
+        if steals_rad is not None and steals_dire is not None:
+            steal_for = (steals_rad if team_is_radiant else steals_dire) > 0
+            steal_against = (steals_dire if team_is_radiant else steals_rad) > 0
+
+        rows.append(
+            {
+                "label": None,  # fill later
                 "team_id": team_id,
                 "team_is_radiant": team_is_radiant,
                 "is_first_pick": first_pick_team == team_id if first_pick_team is not None else None,
@@ -740,67 +985,280 @@ def team_block(
     matches_count: Optional[int] = None,
     matches_raw: Optional[pl.DataFrame] = None,
     objectives: Optional[pl.DataFrame] = None,
+    players: Optional[pl.DataFrame] = None,
     adv_snapshots: Optional[pl.DataFrame] = None,
+    elo_latest: Optional[pl.DataFrame] = None,
+    id_to_name: Optional[Dict[int, str]] = None,
+    opponent_team_id: Optional[int] = None,
 ):
     suffix = f" ({matches_count} games)" if matches_count is not None else ""
     label = f"{team_name}{suffix}" if team_name else f"{title}{suffix}"
+    # Current Elo / rank
+    current_elo = None
+    current_rank = None
+    if elo_latest is not None and team_id is not None and "elo_rank" in elo_latest.columns and "elo" in elo_latest.columns:
+        cur = elo_latest.filter(pl.col("team_id") == team_id)
+        if not cur.is_empty():
+            current_elo = cur["elo"][0]
+            current_rank = cur["elo_rank"][0]
     if logo_url:
         col_logo, col_label = st.columns([1, 5])
         with col_logo:
             st.image(logo_url)
         with col_label:
             st.subheader(label)
+            if current_elo is not None:
+                rank_txt = f" (rank #{int(current_rank)})" if current_rank is not None else ""
+
+                st.markdown(f"<h3 style='margin-top:-10px;'>Elo: {current_elo:.1f}{rank_txt}</h3>", unsafe_allow_html=True)
+
+
     else:
         st.subheader(label)
+        if current_elo is not None:
+            rank_txt = f" (rank #{int(current_rank)})" if current_rank is not None else ""
+            st.markdown(f"<h3 style='margin-top:-10px;'>Elo: {current_elo:.1f}{rank_txt}</h3>", unsafe_allow_html=True)
+
     if team_id is None:
         st.info("Select a team.")
         return
 
-    # Pick/side outcomes table
-    pick_df = pick_outcomes_for_team(metrics.get("pick_outcomes"), team_id)
-    st.subheader("Outcomes by side & pick order")
-    if not pick_df.is_empty():
-        label_map = {
-            "overall": "Overall",
-            "radiant_first_pick": "Radiant first pick",
-            "radiant_last_pick": "Radiant last pick",
-            "dire_first_pick": "Dire first pick",
-            "dire_last_pick": "Dire last pick",
-        }
-        order = ["overall", "radiant_first_pick", "radiant_last_pick", "dire_first_pick", "dire_last_pick"]
-        pick_pd = pick_df.to_pandas()
-        pick_pd = pick_pd[pick_pd["label"].isin(order)]
-        pick_pd["label"] = pick_pd["label"].map(label_map)
-
-        def pct(val):
-            return f"{val*100:.3f}%" if pd.notnull(val) else "N/A"
-
-        rows = []
-        for lbl in order:
-            sub = pick_pd[pick_pd["label"] == label_map.get(lbl, lbl)]
-            if sub.empty:
-                continue
-            r = sub.iloc[0]
-            rows.append(
-                {
-                    "Context": r["label"],
-                    "First blood %": pct(r["first_blood_rate"]),
-                    "First tower %": pct(r["first_tower_rate"]),
-                    "First Roshan %": pct(r["first_roshan_rate"]),
-                    "Winrate %": pct(r["winrate"]),
-                    "FB+FT+FR & win %": pct(r["combo_for_rate"]),
-                    "FB+FT+FR against %": pct(r["combo_against_rate"]),
-                    "Aegis steal %": pct(r["aegis_steal_rate"]),
-                    "Aegis stolen %": pct(r["aegis_steal_against_rate"]),
-                    "Games": int(r["matches"]),
-                }
-            )
-        if rows:
-            st.dataframe(pd.DataFrame(rows))
-        else:
-            st.info("No pick/side outcomes for this team.")
+    # Rank-range comparison (replaces pick/side outcomes)
+    st.subheader("Performance vs rank range")
+    if elo_latest is None or elo_latest.is_empty() or "elo_rank" not in elo_latest.columns or players is None or players.is_empty():
+        st.info("No Elo rank data (run make precompute).")
     else:
-        st.info("No pick/side outcomes for this team.")
+        max_rank = int(elo_latest["elo_rank"].max())
+        team_rank = None
+        if team_id is not None:
+            try:
+                team_rank = float(elo_latest.filter(pl.col("team_id") == team_id)["elo_rank"][0])
+            except Exception:
+                team_rank = None
+        default_low = max(1, int(team_rank - 5)) if team_rank is not None else 1
+        default_high = min(max_rank, int(team_rank + 5)) if team_rank is not None else min(50, max_rank)
+        key_range = f"rank_range_top_{team_id}_{title}"
+        if key_range not in st.session_state:
+            st.session_state[key_range] = (default_low, default_high)
+
+        col_reset = st.columns([1, 4])[0]
+        with col_reset:
+            if st.button("All ranks", key=f"all_ranks_top_{team_id}_{title}"):
+                st.session_state[key_range] = (1, max_rank)
+
+        rank_range = st.slider(
+            "Rank range",
+            min_value=1,
+            max_value=max_rank,
+            value=st.session_state.get(key_range, (default_low, default_high)),
+            step=1,
+            key=key_range,
+        )
+        include_opponent_range = True
+
+        df_range = compute_rank_range_metrics(
+            team_id,
+            matches_raw,
+            objectives,
+            players,
+            metrics.get("draft_meta"),
+            elo_latest,
+            rank_min=rank_range[0],
+            rank_max=rank_range[1],
+            include_opponent=include_opponent_range,
+            opponent_team_id=opponent_team_id,
+        )
+        eligible = []
+        if elo_latest is not None and not elo_latest.is_empty():
+            for r in elo_latest.iter_rows(named=True):
+                tid = r.get("team_id")
+                trk = r.get("elo_rank")
+                if tid is None or trk is None:
+                    continue
+                if not (rank_range[0] <= trk <= rank_range[1]):
+                    continue
+                if not include_opponent_range and opponent_team_id is not None and tid == opponent_team_id:
+                    continue
+                name = id_to_name.get(int(tid)) if id_to_name is not None else None
+                name = name or r.get("name") or str(tid)
+                eligible.append((tid, name, trk))
+
+        matches_count_range = df_range["matches"].sum() if df_range is not None and not df_range.is_empty() else 0
+        st.markdown(f"<p>Ranks [{rank_range[0]}, {rank_range[1]}] — {int(matches_count_range)} games</p>", unsafe_allow_html=True)
+
+        if eligible:
+            with st.expander("Teams in range (by rank)", expanded=False):
+                lines = [f"- {name} (rank {int(rank)})" for _, name, rank in sorted(eligible, key=lambda x: x[2])]
+                st.markdown("\n".join(lines))
+
+        if df_range is None or df_range.is_empty():
+            st.info("No matches in this rank range.")
+        else:
+            label_map = {
+                "overall": "Overall",
+                "radiant_first_pick": "Radiant first pick",
+                "radiant_last_pick": "Radiant last pick",
+                "dire_first_pick": "Dire first pick",
+                "dire_last_pick": "Dire last pick",
+            }
+            order = ["overall", "radiant_first_pick", "radiant_last_pick", "dire_first_pick", "dire_last_pick"]
+            df = df_range.to_pandas()
+            df = df[df["label"].isin(order)]
+            df["label"] = df["label"].map(label_map)
+            def pct(val):
+                return f"{val*100:.3f}%" if pd.notnull(val) else "N/A"
+            rows = []
+            for lbl in order:
+                sub = df[df["label"] == label_map.get(lbl, lbl)]
+                if sub.empty:
+                    continue
+                r = sub.iloc[0]
+                rows.append(
+                    {
+                        "Context": r["label"],
+                        "First blood %": pct(r["first_blood_rate"]),
+                        "First tower %": pct(r["first_tower_rate"]),
+                        "First Roshan %": pct(r["first_roshan_rate"]),
+                        "Winrate %": pct(r["winrate"]),
+                        "FB+FT+FR & win %": pct(r["combo_for_rate"]),
+                        "FB+FT+FR against %": pct(r["combo_against_rate"]),
+                        "Aegis steal %": pct(r["aegis_steal_rate"]),
+                        "Aegis stolen %": pct(r["aegis_steal_against_rate"]),
+                        "Games": int(r["matches"]),
+                    }
+                )
+            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+            # Duration view for this rank range
+            dur_range = durations_for_team_in_rank_range(
+                team_id,
+                matches_raw,
+                elo_latest,
+                rank_min=rank_range[0],
+                rank_max=rank_range[1],
+                include_opponent=include_opponent_range,
+                opponent_team_id=opponent_team_id,
+            )
+            st.subheader("Game duration (rank-range)")
+            if dur_range is None or len(dur_range) == 0:
+                st.info("No duration data in this rank range.")
+            else:
+                thresholds = [20, 30, 40, 60]
+                overs_focus = [30, 40, 60]
+                dist_stats = duration_bucket_stats(dur_range, thresholds, overs=overs_focus)
+                mean = float(np.mean(dur_range))
+                std = float(np.std(dur_range))
+                st.markdown(
+                    """
+                    <style>
+                    .duration-cards {
+                        display: grid;
+                        grid-template-columns: repeat(5, minmax(100px, 1fr));
+                        gap: 10px;
+                        margin: 10px 0;
+                    }
+                    .duration-card {
+                        background: #f7f9ff;
+                        border: 1px solid #dce3f5;
+                        border-radius: 10px;
+                        padding: 6px;
+                        text-align: center;
+                        box-shadow: 0 4px 10px rgba(84, 104, 180, 0.08);
+                    }
+                    .duration-card h4 {
+                        margin: 0;
+                        font-size: 22px;
+                        color: #2c3144;
+                        text-align: center;
+                        padding: 10px 0;
+                    }
+
+                    .duration-card h4 > span {
+                        display: none;
+                    }   
+
+                    .duration-card p {
+                        margin: 4px 0 0 0;
+                        color: #555d73;
+                        font-size: 18px;
+                    }
+                    .duration-header {
+                        background: #eef3ff;
+                        border: 1px solid #dce3f5;
+                        border-radius: 12px;
+                        padding: 12px 16px;
+                        text-align: center;
+                        box-shadow: 0 6px 16px rgba(84, 104, 180, 0.08);
+                        margin-bottom: 8px;
+                    }
+                    </style>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f"<div class='duration-header'><div>Average duration</div><div style='font-size:32px;font-weight:700;'>{mean:.1f} min</div><div style='color:#616779;font-size:14px;'>{int(len(dur_range))} matches</div></div>",
+                    unsafe_allow_html=True,
+                )
+
+                # key_values = [
+                #     ("<20", float(np.mean(dur_range < 20))),
+                #     (">30", float(np.mean(dur_range > 30))),
+                #     (">40", float(np.mean(dur_range > 40))),
+                #     (">60", float(np.mean(dur_range > 60))),
+                # ]
+                # key_cards = "".join(
+                #     f"<div class='duration-card'><h4>{lbl}</h4><p>{pct*100:.1f}% of games</p></div>" for lbl, pct in key_values
+                # )
+                # st.markdown(f"<div class='duration-cards'>{key_cards}</div>", unsafe_allow_html=True)
+
+                bucket_cards = "".join(
+                    f"<div class='duration-card'><h4>{b['label']}</h4><p>{b['pct']*100:.1f}% <br> ({b['count']} games)</p></div>"
+                    for b in dist_stats["buckets"]
+                )
+                st.markdown(f"<div class='duration-cards'>{bucket_cards}</div>", unsafe_allow_html=True)
+
+                bins = 25
+                hist, edges = np.histogram(dur_range, bins=bins, density=True)
+                hist_df = pd.DataFrame({"duration_min": edges[:-1], "density": hist})
+                charts = []
+                hist_chart = (
+                    alt.Chart(hist_df)
+                    .mark_bar(opacity=0.4)
+                    .encode(
+                        x=alt.X("duration_min:Q", bin=alt.Bin(binned=True, step=(edges[1] - edges[0])), title="Match duration (min)"),
+                        y=alt.Y("density:Q", title="Density"),
+                        tooltip=[alt.Tooltip("duration_min:Q", format=".1f"), alt.Tooltip("density:Q", format=".3f")],
+                    )
+                )
+                charts.append(hist_chart)
+                if std > 0:
+                    x_min = max(0.0, float(np.min(dur_range)) - 5)
+                    x_max = float(np.max(dur_range)) + 5
+                    x_vals = np.linspace(x_min, x_max, 200)
+                    pdf = (1 / (std * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x_vals - mean) / std) ** 2)
+                    gauss_df = pd.DataFrame({"duration_min": x_vals, "pdf": pdf})
+                    gauss_chart = (
+                        alt.Chart(gauss_df)
+                        .mark_line(color="firebrick", strokeWidth=2)
+                        .encode(
+                            x=alt.X("duration_min:Q", title="Match duration (min)"),
+                            y=alt.Y("pdf:Q", title="Density"),
+                            tooltip=[alt.Tooltip("duration_min:Q", format=".1f"), alt.Tooltip("pdf:Q", format=".3f")],
+                        )
+                    )
+                    charts.append(gauss_chart)
+                rules_df = pd.DataFrame({"duration_min": thresholds, "label": [f"{t} min" for t in thresholds]})
+                rule_chart = (
+                    alt.Chart(rules_df)
+                    .mark_rule(color="gray", strokeDash=[4, 4])
+                    .encode(x="duration_min:Q", tooltip=["label"])
+                )
+                charts.append(rule_chart)
+
+                combo = charts[0]
+                for ch in charts[1:]:
+                    combo = combo + ch
+                st.altair_chart(combo, use_container_width=True)
 
     # Gold/XP buckets
     gold_df = metrics.get("gold_buckets")
@@ -808,8 +1266,14 @@ def team_block(
     if gold_df is not None and not gold_df.is_empty():
         minutes = sorted(gold_df["minute"].unique())
         default_min = 10 if 10 in minutes else (minutes[0] if minutes else 10)
+
+    
+        st.markdown("<hr>",unsafe_allow_html=True)
+
+        st.subheader("Minute (gold/xp buckets)")
+
         min_choice = st.selectbox(
-            "Minute (gold/xp buckets)",
+            "",
             minutes,
             index=minutes.index(default_min) if minutes else 0,
             key=f"gx_minute_{team_id}_{title}",
@@ -895,6 +1359,7 @@ def team_block(
     # Series stats by BO type
     series_team = metrics.get("series_team")
     if series_team is not None and not series_team.is_empty():
+        st.markdown("<hr>",unsafe_allow_html=True)
         st.subheader("Winrate by map_num and BO type")
         df_team = series_stats_for_team(series_team, team_id).to_pandas()
         if not df_team.empty:
@@ -954,87 +1419,53 @@ def team_block(
     else:
         st.info("No Elo metrics.")
 
-    # Game duration Gaussian view
-    durations = durations_for_team(matches_raw, team_id) if matches_raw is not None else None
-    st.subheader("Game duration (Gaussian fit)")
-    if durations is None or len(durations) == 0:
-        st.info("No duration data for this team.")
-    else:
-        thresholds = [20, 30, 40, 50 ,60]
-        overs_focus = [30, 40, 50, 60]
-        dist_stats = duration_bucket_stats(durations, thresholds, overs=overs_focus)
-        mean = float(np.mean(durations))
-        std = float(np.std(durations))
-        st.metric("Average duration", f"{mean:.1f} min", help=f"{int(len(durations))} matches")
 
-        # Key zones
-        key_cols = st.columns(4)
-        key_values = {
-            "<20": float(np.mean(durations < 20)),
-            ">30": float(np.mean(durations > 30)),
-            ">40": float(np.mean(durations > 40)),
-            ">60": float(np.mean(durations > 60)),
-        }
-        for col, (lbl, pct) in zip(key_cols, key_values.items()):
-            with col:
-                st.markdown(f"**{lbl}**")
-                st.caption(f"{pct*100:.1f}% of games")
+        # Histogram + Gaussian overlay so something is always visible
+        bins = 25
+        hist, edges = np.histogram(durations, bins=bins, density=True)
+        hist_df = pd.DataFrame({"duration_min": edges[:-1], "density": hist})
+        charts = []
+        hist_chart = (
+            alt.Chart(hist_df)
+            .mark_bar(opacity=0.4)
+            .encode(
+                x=alt.X("duration_min:Q", bin=alt.Bin(binned=True, step=(edges[1] - edges[0])), title="Match duration (min)"),
+                y=alt.Y("density:Q", title="Density"),
+                tooltip=[alt.Tooltip("duration_min:Q", format=".1f"), alt.Tooltip("density:Q", format=".3f")],
+            )
+        )
+        charts.append(hist_chart)
+        if std > 0:
+            x_min = max(0.0, float(np.min(durations)) - 5)
+            x_max = float(np.max(durations)) + 5
+            x_vals = np.linspace(x_min, x_max, 200)
+            pdf = (1 / (std * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x_vals - mean) / std) ** 2)
+            gauss_df = pd.DataFrame({"duration_min": x_vals, "pdf": pdf})
+            gauss_chart = (
+                alt.Chart(gauss_df)
+                .mark_line(color="firebrick", strokeWidth=2)
+                .encode(
+                    x=alt.X("duration_min:Q", title="Match duration (min)"),
+                    y=alt.Y("pdf:Q", title="Density"),
+                    tooltip=[alt.Tooltip("duration_min:Q", format=".1f"), alt.Tooltip("pdf:Q", format=".3f")],
+                )
+            )
+            charts.append(gauss_chart)
+        # Threshold markers
+        rules_df = pd.DataFrame({"duration_min": thresholds, "label": [f"{t} min" for t in thresholds]})
+        rule_chart = (
+            alt.Chart(rules_df)
+            .mark_rule(color="gray", strokeDash=[4, 4])
+            .encode(x="duration_min:Q", tooltip=["label"])
+        )
+        charts.append(rule_chart)
 
-        # Buckets view
-        bucket_cols = st.columns(len(dist_stats["buckets"]))
-        for col, b in zip(bucket_cols, dist_stats["buckets"]):
-            with col:
-                st.markdown(f"**{b['label']}**")
-                st.caption(f"{b['pct']*100:.1f}% ({b['count']} games)")
+        combo = charts[0]
+        for ch in charts[1:]:
+            combo = combo + ch
+        st.altair_chart(combo, use_container_width=True)
 
-        # # Over-threshold quick view
-        # over_rows = [{"Over": o["label"], "Share": f"{o['pct']*100:.1f}%"} for o in dist_stats["overs"]]
-        # st.dataframe(pd.DataFrame(over_rows), use_container_width=True, hide_index=True)
-
-        # # Histogram + Gaussian overlay so something is always visible
-        # bins = 25
-        # hist, edges = np.histogram(durations, bins=bins, density=True)
-        # hist_df = pd.DataFrame({"duration_min": edges[:-1], "density": hist})
-        # charts = []
-        # hist_chart = (
-        #     alt.Chart(hist_df)
-        #     .mark_bar(opacity=0.4)
-        #     .encode(
-        #         x=alt.X("duration_min:Q", bin=alt.Bin(binned=True, step=(edges[1] - edges[0])), title="Match duration (min)"),
-        #         y=alt.Y("density:Q", title="Density"),
-        #         tooltip=[alt.Tooltip("duration_min:Q", format=".1f"), alt.Tooltip("density:Q", format=".3f")],
-        #     )
-        # )
-        # charts.append(hist_chart)
-        # if std > 0:
-        #     x_min = max(0.0, float(np.min(durations)) - 5)
-        #     x_max = float(np.max(durations)) + 5
-        #     x_vals = np.linspace(x_min, x_max, 200)
-        #     pdf = (1 / (std * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x_vals - mean) / std) ** 2)
-        #     gauss_df = pd.DataFrame({"duration_min": x_vals, "pdf": pdf})
-        #     gauss_chart = (
-        #         alt.Chart(gauss_df)
-        #         .mark_line(color="firebrick", strokeWidth=2)
-        #         .encode(
-        #             x=alt.X("duration_min:Q", title="Match duration (min)"),
-        #             y=alt.Y("pdf:Q", title="Density"),
-        #             tooltip=[alt.Tooltip("duration_min:Q", format=".1f"), alt.Tooltip("pdf:Q", format=".3f")],
-        #         )
-        #     )
-        #     charts.append(gauss_chart)
-        # # Threshold markers
-        # rules_df = pd.DataFrame({"duration_min": thresholds, "label": [f"{t} min" for t in thresholds]})
-        # rule_chart = (
-        #     alt.Chart(rules_df)
-        #     .mark_rule(color="gray", strokeDash=[4, 4])
-        #     .encode(x="duration_min:Q", tooltip=["label"])
-        # )
-        # charts.append(rule_chart)
-
-        # combo = charts[0]
-        # for ch in charts[1:]:
-        #     combo = combo + ch
-        # st.altair_chart(combo, use_container_width=True)
+        # Rank-range comparison moved to top section
 
 
 def main():
@@ -1065,6 +1496,7 @@ def main():
     tracked_names = metrics.get("tracked_teams")
     team_names_df = load_team_options(teams_dict, tracked_names, ROOT / TEAMS_CSV_DEFAULT)
     team_options = team_names_df["name"].to_list()
+    id_to_name = {int(r["team_id"]): r.get("name") for r in team_names_df.iter_rows(named=True) if r.get("team_id") is not None} if team_names_df is not None else {}
 
     # Saved teams table (overall outcomes)
     compare_df = load_compare_list(ROOT / COMPARE_PATH)
@@ -1181,9 +1613,30 @@ def main():
             matches_count=matches_a,
             matches_raw=matches_raw,
             objectives=objectives,
+            players=tables["players"],
             adv_snapshots=metrics.get("adv_snapshots"),
+            elo_latest=metrics.get("elo_latest"),
+            id_to_name=id_to_name,
         )
     else:
+        st.markdown(
+            """
+            <style>
+            /* Light background for Team B column in the main compare row */
+            #root > div:nth-child(1) > div.withScreencast > div > div > div > section > div.stMainBlockContainer.block-container.st-emotion-cache-zy6yx3.e4man114 > div > div:nth-child(5) > div > div:nth-child(1) {
+                padding: 16px;
+            }
+            #root > div:nth-child(1) > div.withScreencast > div > div > div > section > div.stMainBlockContainer.block-container.st-emotion-cache-zy6yx3.e4man114 > div > div:nth-child(5) > div > div:nth-child(2) {
+                background: #f6f8ff;
+                border: 1px solid #d8e3ff;
+                box-shadow: 0 6px 16px rgba(84, 104, 180, 0.08);
+                padding: 16px;
+                border-radius: 12px;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
         col_left, col_right = st.columns([1, 1], gap="small")
         with col_left:
             team_block(
@@ -1195,7 +1648,11 @@ def main():
                 matches_count=matches_a,
                 matches_raw=matches_raw,
                 objectives=objectives,
+                players=tables["players"],
                 adv_snapshots=metrics.get("adv_snapshots"),
+                elo_latest=metrics.get("elo_latest"),
+                id_to_name=id_to_name,
+                opponent_team_id=team_b_id,
             )
         # Ligne verticale fine entre les colonnes
         st.markdown(
@@ -1214,7 +1671,11 @@ def main():
                 matches_count=matches_b,
                 matches_raw=matches_raw,
                 objectives=objectives,
+                players=tables["players"],
                 adv_snapshots=metrics.get("adv_snapshots"),
+                elo_latest=metrics.get("elo_latest"),
+                id_to_name=id_to_name,
+                opponent_team_id=team_a_id,
             )
 
         # Head-to-head section
