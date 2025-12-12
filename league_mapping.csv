@@ -1,0 +1,223 @@
+leagueid,name,tier_inferred,location_inferred,confidence,reason,tier_field
+17747, Universal League S2,regular,online,medium,default:regular/online,professional
+16427,1WIN SERIES DOTA 2,regular,online,medium,default:regular/online,professional
+16011,2023 Xmas Cup,regular,online,medium,default:regular/online,professional
+16108,2024 New Year Cup,regular,online,medium,default:regular/online,professional
+17875,ACL×ESL Challenger China,regular,online,medium,default:regular/online,professional
+18502,Americas Convergence Series 1,regular,online,medium,default:regular/online,professional
+18498,Americas Convergence Series 1,regular,online,medium,default:regular/online,professional
+18474,Americas Convergence Series 1,regular,online,medium,default:regular/online,professional
+16714,Arena of Gods,regular,online,medium,default:regular/online,professional
+16925,Asian Dragon Series: Continental Collision,regular,online,medium,default:regular/online,professional
+17458,AsiaPro League,regular,online,medium,default:regular/online,professional
+17622,AsiaPro League S2,regular,online,medium,default:regular/online,professional
+17199,Battle Squawk,regular,online,medium,default:regular/online,professional
+16098,BetBoom Dacha - Closed Qualifier - China and SEA,qualifier,online,high,keyword:qualifier,professional
+16093,BetBoom Dacha - Closed Qualifier - EEU,qualifier,online,high,keyword:qualifier,professional
+16100,BetBoom Dacha - Closed Qualifier - MENA,qualifier,online,high,keyword:qualifier,professional
+16097,BetBoom Dacha - Closed Qualifier - NA and SA,qualifier,online,high,keyword:qualifier,professional
+16099,BetBoom Dacha - Closed Qualifier - WEU,qualifier,online,high,keyword:qualifier,professional
+17126,BetBoom Dacha Belgrade 2024,major,lan,high,keyword:major/lan,professional
+17122,BetBoom Dacha Belgrade 2024 - Closed Qualifiers - Americas,qualifier,online,high,keyword:qualifier,professional
+17109,BetBoom Dacha Belgrade 2024 - Closed Qualifiers - China,qualifier,online,high,keyword:qualifier,professional
+17092,BetBoom Dacha Belgrade 2024 - Closed Qualifiers - EEU,qualifier,online,high,keyword:qualifier,professional
+17108,BetBoom Dacha Belgrade 2024 - Closed Qualifiers - SEA,qualifier,online,high,keyword:qualifier,professional
+17091,BetBoom Dacha Belgrade 2024 - Closed Qualifiers - WEU,qualifier,online,high,keyword:qualifier,professional
+16169,BetBoom Dacha Dubai 2024,major,lan,high,keyword:major/lan,professional
+18592,BetBoom RU Battle,regular,online,medium,default:regular/online,professional
+17554,Bitel True Fighters #4,regular,online,medium,default:regular/online,professional
+17074,Bitel True Fighters 2024,regular,online,medium,default:regular/online,professional
+17414,BLAST SLAM I,major,lan,high,keyword:blast slam (lan finals assumed),professional
+18706,BLAST Slam IV: China Closed Qualifier,qualifier,online,high,keyword:qualifier,professional
+18830,BLAST Slam V: China Closed Qualifier,qualifier,online,high,keyword:qualifier,professional
+16158,Blizzard Brawl: New year decider,regular,online,medium,default:regular/online,professional
+18242,CCT Dota 2 Season 2 Series 1,regular,online,medium,default:regular/online,professional
+18201,CCT Dota 2 Season 2 Series 1,regular,online,medium,default:regular/online,professional
+18374,CCT Dota 2 Season 2 Series 2,regular,online,medium,default:regular/online,professional
+18396,CCT Dota 2 Season 2 Series 3,regular,online,medium,default:regular/online,professional
+18524,CCT Dota 2 Season 2 Series 4,regular,online,medium,default:regular/online,professional
+18666,CCT Dota 2 Season 2 Series 5,regular,online,medium,default:regular/online,professional
+18955,CCT Dota 2 Season 2 Series 6,regular,online,medium,default:regular/online,professional
+18799,CCT Dota 2 Season 2 South America Series 1,regular,online,medium,default:regular/online,professional
+16869,CCT Dota 2 Series 1,regular,online,medium,default:regular/online,professional
+16953,CCT Dota 2 Series 2,regular,online,medium,default:regular/online,professional
+17056,CCT Dota 2 Series 3,regular,online,medium,default:regular/online,professional
+17111,CCT Dota 2 Series 4,regular,online,medium,default:regular/online,professional
+17425,CCT Dota 2 Series 5,regular,online,medium,default:regular/online,professional
+17637,CCT Dota 2 Series 6,regular,online,medium,default:regular/online,professional
+17782,CCT Dota 2 Series 7,regular,online,medium,default:regular/online,professional
+17984,CCT Dota 2 Series 8,regular,online,medium,default:regular/online,professional
+18660,CIS Battle 3,regular,online,medium,default:regular/online,professional
+18491,CIS Battle Dota 2,regular,online,medium,default:regular/online,professional
+16901,Clavision DOTA League S1 : Snow-Ruyi,regular,online,medium,default:regular/online,professional
+18359,Clavision DOTA2 Masters 2025: Snow-Ruyi,regular,online,medium,default:regular/online,professional
+16338,Cringe Station Tournament,regular,online,medium,default:regular/online,professional
+18769,DreamLeague Division 2 Season 1,regular,online,medium,default:regular/online,professional
+18897,DreamLeague Division 2 Season 2,regular,online,medium,default:regular/online,professional
+16201,DreamLeague Season 22 powered by Intel,major,online,high,keyword:dreamleague (online tier1),professional
+16053,DreamLeague Season 22 Qualifiers,qualifier,online,high,keyword:qualifier,professional
+16632,DreamLeague Season 23 powered by Intel,major,online,high,keyword:dreamleague (online tier1),professional
+16390,DreamLeague Season 23 Qualifiers Powered by Intel,qualifier,online,high,keyword:qualifier,professional
+17272,DreamLeague Season 24 powered by Intel,major,online,high,keyword:dreamleague (online tier1),professional
+17765,DreamLeague Season 25 powered by Intel,major,online,high,keyword:dreamleague (online tier1),professional
+17628,DreamLeague Season 25 Qualifiers powered by Intel,qualifier,online,high,keyword:qualifier,professional
+18111,DreamLeague Season 26,major,online,high,keyword:dreamleague (online tier1),professional
+17874,DreamLeague Season 26 Qualifiers,qualifier,online,high,keyword:qualifier,professional
+18629,DreamLeague Season 27 Qualifiers,qualifier,online,high,keyword:qualifier,professional
+17135,DreamLeague Season Qualifiers 24 powered by Intel,qualifier,online,high,keyword:qualifier,professional
+17876,E-sport SM 2025,regular,online,medium,default:regular/online,professional
+16408,Elite League - Closed Qualifier China,qualifier,online,high,keyword:qualifier,professional
+16404,Elite League - Closed Qualifier Eastern Europe,qualifier,online,high,keyword:qualifier,professional
+16410,Elite League - Closed Qualifier MENA,qualifier,online,high,keyword:qualifier,professional
+16409,Elite League - Closed Qualifier SEA,qualifier,online,high,keyword:qualifier,professional
+16407,Elite League - Closed Qualifier South America,qualifier,online,high,keyword:qualifier,professional
+16405,Elite League - Closed Qualifier Western Europe,qualifier,online,high,keyword:qualifier,professional
+16483,Elite League by FISSURE and ESB,major,lan,high,keyword:major,professional
+16774,Elite League Season 2 CN Closed Qualifiers – presented by ESB,qualifier,online,high,keyword:qualifier,professional
+16776,Elite League Season 2 EEU Closed Qualifiers – presented by ESB,qualifier,online,high,keyword:qualifier,professional
+16905,Elite League Season 2 Main Event – presented by ESB,major,lan,high,keyword:major,professional
+16778,Elite League Season 2 NA Closed Qualifiers – presented by ESB,qualifier,online,high,keyword:qualifier,professional
+16779,Elite League Season 2 SA Closed Qualifiers – presented by ESB,qualifier,online,high,keyword:qualifier,professional
+16775,Elite League Season 2 SEA Closed Qualifiers – presented by ESB,qualifier,online,high,keyword:qualifier,professional
+16777,Elite League Season 2 WEU Closed Qualifiers – presented by ESB,qualifier,online,high,keyword:qualifier,professional
+17319,Epic Clash,regular,online,medium,default:regular/online,professional
+15899,EPL World Series: America 2023-2024 Season ,regular,online,medium,default:regular/online,professional
+17367,EPL World Series: America 2024-2025 Season ,regular,online,medium,default:regular/online,professional
+17659,EPL World Series: Southeast Asia 2024-2025 Season ,regular,online,medium,default:regular/online,professional
+18865,EPL World Series: Southeast Asia 2025-2026 Season ,regular,online,medium,default:regular/online,professional
+17509,ESL One Bangkok 2024 powered by Intel,major,lan,high,keyword:major/lan,professional
+17299,ESL One Bangkok 2024 Qualifiers powered by Intel,qualifier,online,high,keyword:qualifier,professional
+16518,ESL One Birmingham 2024 Powered by Intel,major,lan,high,keyword:major/lan,professional
+16140,ESL One Birmingham 2024 Qualifiers powered by Intel,qualifier,online,high,keyword:qualifier,professional
+17795,ESL One Raleigh 2025,major,lan,high,keyword:major/lan,professional
+17629,ESL One Raleigh 2025 Qualifiers,qualifier,online,high,keyword:qualifier,professional
+18375,Esports World Cup 2025,major,lan,high,keyword:major/lan,professional
+18210,Esports World Cup 2025 Qualifiers,qualifier,online,high,keyword:qualifier,professional
+15898,European Pro League  2023-2024 Season,regular,online,medium,default:regular/online,professional
+17381,European Pro League  2024-2025 Season,regular,online,medium,default:regular/online,professional
+18866,European Pro League  2025-2026 Season,regular,online,medium,default:regular/online,professional
+17525,FISSURE PLAYGROUND - Closed Qualifiers - Americas,qualifier,online,high,keyword:qualifier,professional
+17527,FISSURE PLAYGROUND - Closed Qualifiers - China,qualifier,online,high,keyword:qualifier,professional
+17523,FISSURE PLAYGROUND - Closed Qualifiers - EEU,qualifier,online,high,keyword:qualifier,professional
+17526,FISSURE PLAYGROUND - Closed Qualifiers - SEA,qualifier,online,high,keyword:qualifier,professional
+17524,FISSURE PLAYGROUND - Closed Qualifiers - WEU,qualifier,online,high,keyword:qualifier,professional
+17588,FISSURE PLAYGROUND 1 - Dota,regular,online,medium,default:regular/online,professional
+18863,FISSURE PLAYGROUND 2,regular,online,medium,default:regular/online,professional
+18668,FISSURE PLAYGROUND 2 - Closed Qualifiers - Americas,qualifier,online,high,keyword:qualifier,professional
+18700,FISSURE PLAYGROUND 2 - Closed Qualifiers - Americas (SA),qualifier,online,high,keyword:qualifier,professional
+18667,FISSURE PLAYGROUND 2 - Closed Qualifiers - China,qualifier,online,high,keyword:qualifier,professional
+18038,FISSURE PLAYGROUND 2 - Closed Qualifiers - EEU,qualifier,online,high,keyword:qualifier,professional
+18670,FISSURE PLAYGROUND 2 - Closed Qualifiers - WEU+EEU,qualifier,online,high,keyword:qualifier,professional
+18046,FISSURE Special,regular,online,medium,default:regular/online,professional
+16730,FISSURE Tournament ,regular,online,medium,default:regular/online,professional
+17772,FISSURE Universe Ep.4 - Closed Qualifiers - China,qualifier,online,high,keyword:qualifier,professional
+17767,FISSURE Universe Ep.4 - Closed Qualifiers - EEU,qualifier,online,high,keyword:qualifier,professional
+17769,FISSURE Universe Ep.4 - Closed Qualifiers - NA,qualifier,online,high,keyword:qualifier,professional
+17770,FISSURE Universe Ep.4 - Closed Qualifiers - SA,qualifier,online,high,keyword:qualifier,professional
+17771,FISSURE Universe Ep.4 - Closed Qualifiers - SEA,qualifier,online,high,keyword:qualifier,professional
+17768,FISSURE Universe Ep.4 - Closed Qualifiers - WEU,qualifier,online,high,keyword:qualifier,professional
+17907,FISSURE Universe Episode 4,regular,online,medium,default:regular/online,professional
+18107,FISSURE Universe Episode 5,regular,online,medium,default:regular/online,professional
+18433,FISSURE Universe Episode 6,regular,online,medium,default:regular/online,professional
+18633,FISSURE Universe Episode 7,regular,online,medium,default:regular/online,professional
+16846,FISSURE Universe: Episode 3,regular,online,medium,default:regular/online,professional
+15981,Games of Future 2024,major,lan,high,keyword:major/lan,professional
+18485,III Киберспортивный турнир Сбера по Dota 2,regular,online,medium,default:regular/online,professional
+16586,Kobolds Rave 2,regular,online,medium,default:regular/online,professional
+16981,LATAMAX Cup Royal,regular,online,medium,default:regular/online,professional
+16743,LEON.BET Masters DOTA2 #1,regular,online,medium,default:regular/online,professional
+16349,Maincard Unmatched,regular,online,medium,default:regular/online,professional
+17326,MESA Invitational,regular,online,medium,default:regular/online,professional
+18190,NADCL Season 8,regular,online,medium,default:regular/online,professional
+16248,Opus League ,regular,online,medium,default:regular/online,professional
+16669,PGL Wallachia 2024 Season 1,major,lan,high,keyword:major/lan,professional
+17119,PGL Wallachia 2024 Season 2,major,lan,high,keyword:major/lan,professional
+17891,PGL Wallachia 2025 Season 3,major,lan,high,keyword:major/lan,professional
+18058,PGL Wallachia 2025 Season 4,major,lan,high,keyword:major/lan,professional
+18358,PGL Wallachia 2025 Season 5,major,lan,high,keyword:major/lan,professional
+18920,PGL Wallachia 2025 Season 6,major,lan,high,keyword:major/lan,professional
+16479,PGL Wallachia Season #1 CN Closed Qualifiers,qualifier,online,high,keyword:qualifier,professional
+16480,PGL Wallachia Season #1 EEU Closed Qualifiers,qualifier,online,high,keyword:qualifier,professional
+16476,PGL Wallachia Season #1 NA Closed Qualifiers,qualifier,online,high,keyword:qualifier,professional
+16477,PGL Wallachia Season #1 SA Closed Qualifiers,qualifier,online,high,keyword:qualifier,professional
+16478,PGL Wallachia Season #1 SEA Closed Qualifiers,qualifier,online,high,keyword:qualifier,professional
+16481,PGL Wallachia Season #1 WEU Closed Qualifiers,qualifier,online,high,keyword:qualifier,professional
+17010,PGL Wallachia Season #2 CN Closed Qualifiers,qualifier,online,high,keyword:qualifier,professional
+17011,PGL Wallachia Season #2 EEU Closed Qualifiers,qualifier,online,high,keyword:qualifier,professional
+17007,PGL Wallachia Season #2 NA Closed Qualifiers,qualifier,online,high,keyword:qualifier,professional
+17008,PGL Wallachia Season #2 SA Closed Qualifiers,qualifier,online,high,keyword:qualifier,professional
+17009,PGL Wallachia Season #2 SEA Closed Qualifiers,qualifier,online,high,keyword:qualifier,professional
+17012,PGL Wallachia Season #2 WEU Closed Qualifiers,qualifier,online,high,keyword:qualifier,professional
+17672,PGL Wallachia Season #3 CN Closed Qualifiers,qualifier,online,high,keyword:qualifier,professional
+17674,PGL Wallachia Season #3 EEU Closed Qualifiers,qualifier,online,high,keyword:qualifier,professional
+17669,PGL Wallachia Season #3 NA Closed Qualifiers,qualifier,online,high,keyword:qualifier,professional
+17670,PGL Wallachia Season #3 SA Closed Qualifiers,qualifier,online,high,keyword:qualifier,professional
+17671,PGL Wallachia Season #3 SEA Closed Qualifiers,qualifier,online,high,keyword:qualifier,professional
+17673,PGL Wallachia Season #3 WEU Closed Qualifiers,qualifier,online,high,keyword:qualifier,professional
+17778,PGL Wallachia Season #4 AMER Closed Qualifiers,qualifier,online,high,keyword:qualifier,professional
+17777,PGL Wallachia Season #4 CN Closed Qualifiers,qualifier,online,high,keyword:qualifier,professional
+17774,PGL Wallachia Season #4 EEU Closed Qualifiers,qualifier,online,high,keyword:qualifier,professional
+17776,PGL Wallachia Season #4 SEA Closed Qualifiers,qualifier,online,high,keyword:qualifier,professional
+17775,PGL Wallachia Season #4 WEU Closed Qualifiers,qualifier,online,high,keyword:qualifier,professional
+18751,PGL Wallachia Season #6 AMER Closed Qualifiers,qualifier,online,high,keyword:qualifier,professional
+18749,PGL Wallachia Season #6 CN Closed Qualifiers,qualifier,online,high,keyword:qualifier,professional
+18747,PGL Wallachia Season #6 EEU Closed Qualifiers,qualifier,online,high,keyword:qualifier,professional
+18750,PGL Wallachia Season #6 SEA Closed Qualifiers,qualifier,online,high,keyword:qualifier,professional
+18748,PGL Wallachia Season #6 WEU Closed Qualifiers,qualifier,online,high,keyword:qualifier,professional
+17059,Phoenix League,regular,online,medium,default:regular/online,professional
+16527,Portal Dota2 World Invitationals,regular,online,medium,default:regular/online,professional
+17512,PREDATOR LEAGUE APAC FINALS 2025,regular,online,medium,default:regular/online,professional
+18995,REDRAGON Battle Series DOTA2,regular,online,medium,default:regular/online,professional
+18766,Redragon Latam Series Dota2,regular,online,medium,default:regular/online,professional
+16343,RES - Regional Series EU #1,regular,online,medium,default:regular/online,professional
+16707,RES - Regional Series EU #3,regular,online,medium,default:regular/online,professional
+16710,RES - Regional Series EU #4,regular,online,medium,default:regular/online,professional
+16706,RES - Regional Series LATAM #3,regular,online,medium,default:regular/online,professional
+16709,RES - Regional Series LATAM #4,regular,online,medium,default:regular/online,professional
+16233,RES - Regional Series LATAM 1,regular,online,medium,default:regular/online,professional
+16344,RES - Regional Series SEA #2,regular,online,medium,default:regular/online,professional
+16705,RES - Regional Series SEA #3,regular,online,medium,default:regular/online,professional
+16708,RES - Regional Series SEA #4,regular,online,medium,default:regular/online,professional
+16207,RES - Regional Series SEA 1,regular,online,medium,default:regular/online,professional
+18702,RES Unchained - A Blast Dota Slam IV Qualifier EU,qualifier,online,high,keyword:qualifier,professional
+18704,RES Unchained - A Blast Dota Slam IV Qualifier SEA,qualifier,online,high,keyword:qualifier,professional
+18761,RES Unchained - A Blast Dota Slam V Qualifier EU,qualifier,online,high,keyword:qualifier,professional
+18762,RES Unchained - A Blast Dota Slam V Qualifier SEA,qualifier,online,high,keyword:qualifier,professional
+16881,Riyadh Masters 2024 at Esports World Cup,major,lan,high,keyword:major/lan,professional
+16740,Riyadh Masters 2024 at Esports World Cup Qualifiers,qualifier,online,high,keyword:qualifier,professional
+18859,Road to APAC Predator League 2026 : Indonesian Series,qualifier,online,high,keyword:qualifier,professional
+16844,Road To The International 2024  - Regional Qualifiers North America,qualifier,online,high,keyword:qualifier,professional
+16841,Road To The International 2024  - Regional Qualifiers South America,qualifier,online,high,keyword:qualifier,professional
+16840,Road To The International 2024  - Regional Qualifiers Southeast Asia,qualifier,online,high,keyword:qualifier,professional
+16842,Road To The International 2024  - Regional Qualifiers Western Europe,qualifier,online,high,keyword:qualifier,professional
+16843,Road To The International 2024 - Regional Qualifiers China,qualifier,online,high,keyword:qualifier,professional
+16839,Road To The International 2024 - Regional Qualifiers Eastern Europe,qualifier,online,high,keyword:qualifier,professional
+18306,Road To The International 2025 - Regional Qualifiers China,qualifier,online,high,keyword:qualifier,professional
+18304,Road To The International 2025 - Regional Qualifiers Eastern Europe,qualifier,online,high,keyword:qualifier,professional
+18307,Road To The International 2025 - Regional Qualifiers North America,qualifier,online,high,keyword:qualifier,professional
+18305,Road To The International 2025 - Regional Qualifiers South America,qualifier,online,high,keyword:qualifier,professional
+18308,Road To The International 2025 - Regional Qualifiers Southeast Asia,qualifier,online,high,keyword:qualifier,professional
+18309,Road To The International 2025 - Regional Qualifiers Western Europe,qualifier,online,high,keyword:qualifier,professional
+16933,Samsung Odyssey Cup Dota 2 Championship,regular,online,medium,default:regular/online,professional
+17417,SLAM II,regular,online,medium,default:regular/online,professional
+17418,SLAM III,regular,online,medium,default:regular/online,professional
+17419,SLAM IV,regular,online,medium,default:regular/online,professional
+17420,SLAM V,regular,online,medium,default:regular/online,professional
+18105,Snake Trophy,regular,online,medium,default:regular/online,professional
+18618,Snake Trophy,regular,online,medium,default:regular/online,professional
+18490,Snake Trophy,regular,online,medium,default:regular/online,professional
+18893,Snake Trophy,regular,online,medium,default:regular/online,professional
+19054,Snake Trophy ,regular,online,medium,default:regular/online,professional
+18331,Snake Trophy 2,regular,online,medium,default:regular/online,professional
+17318,Summoner’s Cup,regular,online,medium,default:regular/online,professional
+16078,Sunday Evening Cup Series,regular,online,medium,default:regular/online,professional
+15889,TDL Americas Pro Series 2024 Season 1,regular,online,medium,default:regular/online,professional
+18940,Tennisi Stampede Champions - Season 1,regular,online,medium,default:regular/online,professional
+16935,The International 2024,major,lan,high,keyword:major/lan,premium
+18324,The International 2025,major,lan,high,keyword:major/lan,premium
+17969,ULD Season 2 : Americas,regular,online,medium,default:regular/online,professional
+16290,WINLINE InSight Season 5,regular,online,medium,default:regular/online,professional
+18434,Кубок России Сбера по компьютерному спорту 2025,regular,online,medium,default:regular/online,professional
+17513,Открытые Киберспортивные Игры 2024,regular,online,medium,default:regular/online,professional
+19040,Открытые Киберспортивные Игры Сбера 2025,regular,online,medium,default:regular/online,professional
+18325,Чемпионат России Сбера 2025,regular,online,medium,default:regular/online,professional

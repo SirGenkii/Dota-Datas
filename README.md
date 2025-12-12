@@ -92,3 +92,9 @@ streamlit run app/dashboard_streamlit.py
 - Ensure `OPENDOTA_KEY` is set in `.env` for scraping.
 - Precompute relies on both processed parquet and raw JSON for gold/xp advantages, but Streamlit dashboards now load only the parquet outputs (no raw JSON at runtime).
 - Series mapping uses `series_type`: 0=BO1, 1=BO3, 2=BO5, 3=BO2.
+
+```bash
+ .\.venv\Scripts\Activate.ps1
+
+ streamlit run app/dashboard_streamlit.py
+ ```
