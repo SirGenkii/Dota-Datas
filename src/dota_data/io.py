@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -31,6 +32,49 @@ def _serialize_value(value: Any) -> Any:
     if isinstance(value, (dict, list)):
         return json.dumps(value)
     return value
+
+
+def _clean_name(name: str | None) -> Optional[str]:
+    """Normalize whitespace: trim + collapse multiple spaces."""
+    if not name:
+        return None
+    return " ".join(str(name).strip().split())
+
+
+def _slugify(text: str) -> Optional[str]:
+    """Lightweight slug for tournament names."""
+    if not text:
+        return None
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower())
+    return slug.strip("-") or None
+
+
+DEFAULT_TIER = "regular"
+DEFAULT_LOCATION = "online"
+
+
+def _infer_tournament_tags(tournament_name: Optional[str]) -> tuple[str, str]:
+    """Placeholder for tournament tier/location inference; defaults for now."""
+    # TODO: implement heuristic/mapping-based inference
+    return DEFAULT_TIER, DEFAULT_LOCATION
+
+
+def _extract_league_name(league_value: Any) -> Optional[str]:
+    """Extract and clean the league/tournament name from the raw league field."""
+    raw_name: Optional[str] = None
+    if isinstance(league_value, dict):
+        raw_name = league_value.get("name")
+    elif isinstance(league_value, str):
+        # If already JSON-encoded, try to decode; otherwise use as-is.
+        try:
+            decoded = json.loads(league_value)
+            if isinstance(decoded, dict):
+                raw_name = decoded.get("name")
+            else:
+                raw_name = league_value
+        except Exception:
+            raw_name = league_value
+    return _clean_name(raw_name)
 
 
 def load_raw_matches(path: Path | str) -> List[Dict[str, Any]]:
@@ -77,6 +121,13 @@ def matches_table(raw: Iterable[Dict[str, Any]], alias_map: Optional[Dict[int, i
     for entry in raw:
         match = entry.get("json", {})
         row = {k: _serialize_value(v) for k, v in match.items() if k not in EXCLUDED_MATCH_KEYS}
+        league_name = _extract_league_name(match.get("league"))
+        tier, location = _infer_tournament_tags(league_name)
+        row["league_name"] = league_name
+        row["tournament_name"] = league_name
+        row["tournament_slug"] = _slugify(league_name)
+        row["tournament_tier"] = tier
+        row["tournament_location"] = location
         # Map team ids to canonical if provided
         row["radiant_team_id"] = _map_team_id(row.get("radiant_team_id"), alias_map)
         row["dire_team_id"] = _map_team_id(row.get("dire_team_id"), alias_map)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Iterable, Optional, Tuple
 from datetime import datetime
 
 import pandas as pd
@@ -192,6 +192,7 @@ def durations_for_team_in_rank_range(
     rank_max: int,
     include_opponent: bool,
     opponent_team_id: Optional[int],
+    include_outside_opponents: bool,
 ) -> Optional[np.ndarray]:
     """Durations (minutes) for matches of team_id vs opponents whose rank is in [rank_min, rank_max]."""
     if matches is None or matches.is_empty() or "duration" not in matches.columns or elo_latest is None or elo_latest.is_empty():
@@ -212,12 +213,53 @@ def durations_for_team_in_rank_range(
         if opp_id is None:
             continue
         opp_rank = rank_map.get(int(opp_id))
-        if opp_rank is None or not (rank_min <= opp_rank <= rank_max):
+        opp_in_range = opp_rank is not None and (rank_min <= opp_rank <= rank_max)
+        if not include_outside_opponents and not opp_in_range:
+            continue
+        if opp_rank is None:
             continue
         if not include_opponent and opponent_team_id is not None and opp_id == opponent_team_id:
             continue
         dur = r.get("duration")
         if dur is None:
+            continue
+        durations.append(float(dur) / 60.0)
+    if not durations:
+        return None
+    return np.array(durations, dtype=float)
+
+
+def durations_for_teams_in_rank_range(
+    team_ids: Iterable[int],
+    matches: pl.DataFrame,
+    elo_latest: Optional[pl.DataFrame],
+    rank_min: int,
+    rank_max: int,
+    include_outside_opponents: bool,
+) -> Optional[np.ndarray]:
+    """Durations for all games played by teams in rank range (optionally vs any opponent)."""
+    team_set = {int(t) for t in team_ids if t is not None}
+    if not team_set or matches is None or matches.is_empty() or "duration" not in matches.columns or elo_latest is None or elo_latest.is_empty():
+        return None
+    rank_map = {int(r["team_id"]): r.get("elo_rank") for r in elo_latest.iter_rows(named=True) if r.get("team_id") is not None}
+    durations: list[float] = []
+    for r in matches.iter_rows(named=True):
+        tid_rad = r.get("radiant_team_id")
+        tid_dire = r.get("dire_team_id")
+        dur = r.get("duration")
+        if dur is None:
+            continue
+        if tid_rad in team_set:
+            team_tid, opp_id = tid_rad, tid_dire
+        elif tid_dire in team_set:
+            team_tid, opp_id = tid_dire, tid_rad
+        else:
+            continue
+        opp_rank = rank_map.get(int(opp_id)) if opp_id is not None else None
+        opp_in_range = opp_rank is not None and (rank_min <= opp_rank <= rank_max)
+        if not include_outside_opponents and not opp_in_range:
+            continue
+        if opp_rank is None:
             continue
         durations.append(float(dur) / 60.0)
     if not durations:
@@ -456,6 +498,7 @@ def compute_rank_range_metrics(
     rank_max: int,
     include_opponent: bool,
     opponent_team_id: Optional[int],
+    include_outside_opponents: bool = True,
 ) -> Optional[pl.DataFrame]:
     """Aggregate pick/outcome metrics for a team vs opponents whose elo_rank is within [rank_min, rank_max]."""
     if elo_latest is None or elo_latest.is_empty():
@@ -482,9 +525,10 @@ def compute_rank_range_metrics(
         else:
             continue
         opp_rank = rank_map.get(int(opp_id)) if opp_id is not None else None
-        if opp_rank is None:
+        opp_in_range = opp_rank is not None and (rank_min <= opp_rank <= rank_max)
+        if not include_outside_opponents and not opp_in_range:
             continue
-        if not (rank_min <= opp_rank <= rank_max):
+        if opp_rank is None:
             continue
         if not include_opponent and opponent_team_id is not None and opp_id == opponent_team_id:
             continue
@@ -1038,20 +1082,20 @@ def team_block(
         default_low = max(1, int(team_rank - 5)) if team_rank is not None else 1
         default_high = min(max_rank, int(team_rank + 5)) if team_rank is not None else min(50, max_rank)
         key_range = f"rank_range_top_{team_id}_{title}"
-        if key_range not in st.session_state:
-            st.session_state[key_range] = (default_low, default_high)
+        key_range_dur = f"rank_range_dur_{team_id}_{title}"
 
         col_reset = st.columns([1, 4])[0]
         with col_reset:
             if st.button("All ranks", key=f"all_ranks_top_{team_id}_{title}"):
                 st.session_state[key_range] = (1, max_rank)
 
+        range_default = st.session_state.get(key_range, (default_low, default_high))
         rank_range = st.slider(
             "Rank range",
             min_value=1,
             max_value=max_rank,
-            value=st.session_state.get(key_range, (default_low, default_high)),
             step=1,
+            value=range_default,
             key=key_range,
         )
         include_opponent_range = True
@@ -1067,6 +1111,7 @@ def team_block(
             rank_max=rank_range[1],
             include_opponent=include_opponent_range,
             opponent_team_id=opponent_team_id,
+            include_outside_opponents=False,
         )
         eligible = []
         if elo_latest is not None and not elo_latest.is_empty():
@@ -1125,24 +1170,179 @@ def team_block(
                         "Aegis steal %": pct(r["aegis_steal_rate"]),
                         "Aegis stolen %": pct(r["aegis_steal_against_rate"]),
                         "Games": int(r["matches"]),
-                    }
-                )
+            }
+        )
             st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
-            # Duration view for this rank range
-            dur_range = durations_for_team_in_rank_range(
-                team_id,
-                matches_raw,
-                elo_latest,
-                rank_min=rank_range[0],
-                rank_max=rank_range[1],
-                include_opponent=include_opponent_range,
-                opponent_team_id=opponent_team_id,
-            )
-            st.subheader("Game duration (rank-range)")
-            if dur_range is None or len(dur_range) == 0:
-                st.info("No duration data in this rank range.")
-            else:
+        # Aggregate view for all teams in the rank window (top 5 by games)
+        teams_in_range = []
+        if elo_latest is not None and not elo_latest.is_empty():
+            for r in elo_latest.iter_rows(named=True):
+                tid = r.get("team_id")
+                trk = r.get("elo_rank")
+                if tid is None or trk is None:
+                    continue
+                if rank_range[0] <= trk <= rank_range[1]:
+                    teams_in_range.append(int(tid))
+        
+        # Global combo/aegis across teams in range (not team-oriented)
+        def aggregate_range_metrics(tids: list[int]):
+            labels_order = [
+                ("overall", "Overall"),
+                ("radiant_first_pick", "Radiant first pick"),
+                ("radiant_last_pick", "Radiant last pick"),
+                ("dire_first_pick", "Dire first pick"),
+                ("dire_last_pick", "Dire last pick"),
+            ]
+            accum = {k: {"matches": 0, "combo_sum": 0.0, "aegis_sum": 0.0} for k, _ in labels_order}
+            for tid in tids:
+                df_team = compute_rank_range_metrics(
+                    tid,
+                    matches_raw,
+                    objectives,
+                    players,
+                    metrics.get("draft_meta"),
+                    elo_latest,
+                    rank_min=rank_range[0],
+                    rank_max=rank_range[1],
+                    include_opponent=True,
+                    opponent_team_id=None,
+                    include_outside_opponents=include_cross_range,
+                )
+                if df_team is None or df_team.is_empty():
+                    continue
+                for row in df_team.iter_rows(named=True):
+                    lbl = row.get("label")
+                    if lbl not in accum:
+                        continue
+                    m = row.get("matches") or 0
+                    combo = row.get("combo_for_rate")
+                    aegis = row.get("aegis_steal_rate")
+                    accum[lbl]["matches"] += m
+                    if combo is not None:
+                        accum[lbl]["combo_sum"] += m * combo
+                    if aegis is not None:
+                        accum[lbl]["aegis_sum"] += m * aegis
+            rows_out = []
+            for key, label_txt in labels_order:
+                m = accum[key]["matches"]
+                if m <= 0:
+                    continue
+                combo_pct = accum[key]["combo_sum"] / m if m else None
+                aegis_pct = accum[key]["aegis_sum"] / m if m else None
+                rows_out.append(
+                    {
+                        "Context": label_txt,
+                        "Combo %": f"{combo_pct*100:.1f}%" if combo_pct is not None else "N/A",
+                        "Aegis steal %": f"{aegis_pct*100:.1f}%" if aegis_pct is not None else "N/A",
+                        "Games": int(m),
+                    }
+                )
+            return rows_out
+
+        # Apply include_outside_combo toggle for global aggregation
+        def aggregate_range_metrics(tids: list[int], include_outside: bool):
+            labels_order = [
+                ("overall", "Overall"),
+                ("radiant_first_pick", "Radiant first pick"),
+                ("radiant_last_pick", "Radiant last pick"),
+                ("dire_first_pick", "Dire first pick"),
+                ("dire_last_pick", "Dire last pick"),
+            ]
+            accum = {k: {"matches": 0, "combo_sum": 0.0, "aegis_sum": 0.0} for k, _ in labels_order}
+            for tid in tids:
+                df_team = compute_rank_range_metrics(
+                    tid,
+                    matches_raw,
+                    objectives,
+                    players,
+                    metrics.get("draft_meta"),
+                    elo_latest,
+                    rank_min=rank_range[0],
+                    rank_max=rank_range[1],
+                    include_opponent=True,
+                    opponent_team_id=None,
+                    include_outside_opponents=include_outside,
+                )
+                if df_team is None or df_team.is_empty():
+                    continue
+                for row in df_team.iter_rows(named=True):
+                    lbl = row.get("label")
+                    if lbl not in accum:
+                        continue
+                    m = row.get("matches") or 0
+                    combo = row.get("combo_for_rate")
+                    aegis = row.get("aegis_steal_rate")
+                    accum[lbl]["matches"] += m
+                    if combo is not None:
+                        accum[lbl]["combo_sum"] += m * combo
+                    if aegis is not None:
+                        accum[lbl]["aegis_sum"] += m * aegis
+            rows_out = []
+            for key, label_txt in labels_order:
+                m = accum[key]["matches"]
+                if m <= 0:
+                    continue
+                combo_pct = accum[key]["combo_sum"] / m if m else None
+                aegis_pct = accum[key]["aegis_sum"] / m if m else None
+                rows_out.append(
+                    {
+                        "Context": label_txt,
+                        "Combo %": f"{combo_pct*100:.1f}%" if combo_pct is not None else "N/A",
+                        "Aegis steal %": f"{aegis_pct*100:.1f}%" if aegis_pct is not None else "N/A",
+                        "Games": int(m),
+                    }
+                )
+            return rows_out
+
+        if teams_in_range:
+
+            st.subheader("All teams in range — combo & aegis frequency")
+            include_outside_combo = st.checkbox(
+                                "Inclure les matchs contre des équipes hors range (combo/aegis)",
+                                value=True,
+                                key=f"include_cross_range_combo_{team_id}_{title}",
+                                help="Quand décoché, seules les rencontres où l'adversaire est aussi dans la fenêtre de rang sont gardées pour ce bloc.",
+                            )
+
+            agg_global_rows = aggregate_range_metrics(teams_in_range, include_outside_combo)
+            if agg_global_rows:
+                st.dataframe(pd.DataFrame(agg_global_rows), use_container_width=True)
+
+
+
+        st.subheader("Game duration (rank-range)")
+        
+        # Duration view for this rank range
+        dur_reset_col = st.columns([1, 4])[0]
+        with dur_reset_col:
+            if st.button("All ranks (durations)", key=f"all_ranks_dur_{team_id}_{title}"):
+                st.session_state[key_range_dur] = (1, max_rank)
+
+        range_default_dur = st.session_state.get(key_range_dur, (default_low, default_high))
+        rank_range_duration = st.slider(
+            "Rank range (durations)",
+            min_value=1,
+            max_value=max_rank,
+            step=1,
+            value=range_default_dur,
+            key=key_range_dur,
+        )
+        dur_range = durations_for_team_in_rank_range(
+            team_id,
+            matches_raw,
+            elo_latest,
+            rank_min=rank_range_duration[0],
+            rank_max=rank_range_duration[1],
+            include_opponent=include_opponent_range,
+            opponent_team_id=opponent_team_id,
+            include_outside_opponents=False,
+        )
+        st.markdown(f"<p>Ranks [{rank_range_duration[0]}, {rank_range_duration[1]}] — {int(len(dur_range))} games</p>", unsafe_allow_html=True)
+
+        if dur_range is None or len(dur_range) == 0:
+            st.info("No duration data in this rank range.")
+        else:
                 thresholds = [20, 30, 40, 60]
                 overs_focus = [30, 40, 60]
                 dist_stats = duration_bucket_stats(dur_range, thresholds, overs=overs_focus)
@@ -1258,7 +1458,133 @@ def team_block(
                 combo = charts[0]
                 for ch in charts[1:]:
                     combo = combo + ch
+                with st.expander("Voir l'histogramme des durées (rank-range)", expanded=False):
+                    st.altair_chart(combo, use_container_width=True)
+
+
+        st.subheader("Game duration (teams in range)")
+
+        # Duration view for all games of teams in the rank window
+        include_outside_dur_all = st.checkbox(
+            "Inclure les matchs hors range pour les durées (teams in range)",
+            value=True,
+            key=f"include_cross_range_dur_all_{team_id}_{title}",
+            help="Quand décoché, seules les rencontres où l'adversaire est aussi dans la fenêtre de rang sont gardées pour ce bloc.",
+        )
+        dur_range_all = durations_for_teams_in_rank_range(
+            teams_in_range,
+            matches_raw,
+            elo_latest,
+            rank_min=rank_range_duration[0],
+            rank_max=rank_range_duration[1],
+            include_outside_opponents=include_outside_dur_all,
+        )
+       
+        if dur_range_all is None or len(dur_range_all) == 0:
+            st.info("No duration data for teams in this rank window.")
+        else:
+            thresholds = [20, 30, 40, 60]
+            overs_focus = [30, 40, 60]
+            dist_stats = duration_bucket_stats(dur_range_all, thresholds, overs=overs_focus)
+            mean = float(np.mean(dur_range_all))
+            std = float(np.std(dur_range_all))
+            st.markdown(
+                f"<div class='duration-header'><div>Average duration</div><div style='font-size:32px;font-weight:700;'>{mean:.1f} min</div><div style='color:#616779;font-size:14px;'>{int(len(dur_range_all))} matches</div></div>",
+                unsafe_allow_html=True,
+            )
+            bucket_cards = "".join(
+                f"<div class='duration-card'><h4>{b['label']}</h4><p>{b['pct']*100:.1f}% <br> ({b['count']} games)</p></div>"
+                for b in dist_stats["buckets"]
+            )
+            st.markdown(f"<div class='duration-cards'>{bucket_cards}</div>", unsafe_allow_html=True)
+            bins = 25
+            hist, edges = np.histogram(dur_range_all, bins=bins, density=True)
+            hist_df = pd.DataFrame({"duration_min": edges[:-1], "density": hist})
+            charts = []
+            hist_chart = (
+                alt.Chart(hist_df)
+                .mark_bar(opacity=0.4)
+                .encode(
+                    x=alt.X("duration_min:Q", bin=alt.Bin(binned=True, step=(edges[1] - edges[0])), title="Match duration (min)"),
+                    y=alt.Y("density:Q", title="Density"),
+                    tooltip=[alt.Tooltip("duration_min:Q", format=".1f"), alt.Tooltip("density:Q", format=".3f")],
+                )
+            )
+            charts.append(hist_chart)
+            if std > 0:
+                x_min = max(0.0, float(np.min(dur_range_all)) - 5)
+                x_max = float(np.max(dur_range_all)) + 5
+                x_vals = np.linspace(x_min, x_max, 200)
+                pdf = (1 / (std * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x_vals - mean) / std) ** 2)
+                gauss_df = pd.DataFrame({"duration_min": x_vals, "pdf": pdf})
+                gauss_chart = (
+                    alt.Chart(gauss_df)
+                    .mark_line(color="firebrick", strokeWidth=2)
+                    .encode(
+                        x=alt.X("duration_min:Q", title="Match duration (min)"),
+                        y=alt.Y("pdf:Q", title="Density"),
+                        tooltip=[alt.Tooltip("duration_min:Q", format=".1f"), alt.Tooltip("pdf:Q", format=".3f")],
+                    )
+                )
+                charts.append(gauss_chart)
+            rules_df = pd.DataFrame({"duration_min": thresholds, "label": [f"{t} min" for t in thresholds]})
+            rule_chart = (
+                alt.Chart(rules_df)
+                .mark_rule(color="gray", strokeDash=[4, 4])
+                .encode(x="duration_min:Q", tooltip=["label"])
+            )
+            charts.append(rule_chart)
+
+            combo = charts[0]
+            for ch in charts[1:]:
+                combo = combo + ch
+            with st.expander("Voir l'histogramme des durées (teams in range)", expanded=False):
                 st.altair_chart(combo, use_container_width=True)
+
+# Series stats by BO type
+    series_team = metrics.get("series_team")
+    if series_team is not None and not series_team.is_empty():
+        st.markdown("<hr>",unsafe_allow_html=True)
+        st.subheader("Winrate by map_num and BO type")
+        df_team = series_stats_for_team(series_team, team_id).to_pandas()
+        if not df_team.empty:
+            # Map series_type to label
+            bo_map = {0: "BO1", 1: "BO3", 2: "BO5", 3: "BO2"}
+            df_team["bo_type"] = df_team["series_type"].map(bo_map).fillna("other")
+            bo_options = sorted(df_team["bo_type"].unique())
+            default_idx = bo_options.index("BO3") if "BO3" in bo_options else 0
+            bo_choice = st.selectbox("BO type", bo_options, index=default_idx, key=f"bo_type_{team_id}")
+            df_sel = df_team[df_team["bo_type"] == bo_choice]
+
+            if not df_sel.empty:
+                df_sel = df_sel.copy()
+                df_sel["map_label"] = df_sel["map_num"].apply(lambda x: f"Map {x}")
+                chart_series = (
+                    alt.Chart(df_sel)
+                    .mark_bar()
+                    .encode(
+                        x=alt.X("map_label:N", axis=alt.Axis(title="Map num", labelFontSize=18, titleFontSize=18, labelAngle=0)),
+                        y=alt.Y("winrate:Q", axis=alt.Axis(title="Winrate", labelFontSize=18, titleFontSize=18)),
+                        tooltip=["map_num", "map_label", alt.Tooltip("winrate:Q", format=".3f"), "maps_played"],
+                    )
+                )
+                text_series = chart_series.mark_text(dy=-8, color="black", size=22).encode(text=alt.Text("winrate:Q", format=".1%"))
+                st.altair_chart(chart_series + text_series, use_container_width=True)
+
+                with st.expander("Full table (winrate by map_num)", expanded=False):
+                    st.dataframe(df_sel[["map_num", "winrate", "maps_played"]])
+
+               
+        else:
+            st.info("No series data for this team.")
+    else:
+        st.info("No series metrics (run make precompute).")
+
+
+
+
+
+
 
     # Gold/XP buckets
     gold_df = metrics.get("gold_buckets")
@@ -1356,117 +1682,7 @@ def team_block(
     else:
         st.info("No gold/xp metrics (run make precompute).")
 
-    # Series stats by BO type
-    series_team = metrics.get("series_team")
-    if series_team is not None and not series_team.is_empty():
-        st.markdown("<hr>",unsafe_allow_html=True)
-        st.subheader("Winrate by map_num and BO type")
-        df_team = series_stats_for_team(series_team, team_id).to_pandas()
-        if not df_team.empty:
-            # Map series_type to label
-            bo_map = {0: "BO1", 1: "BO3", 2: "BO5", 3: "BO2"}
-            df_team["bo_type"] = df_team["series_type"].map(bo_map).fillna("other")
-            bo_options = sorted(df_team["bo_type"].unique())
-            default_idx = bo_options.index("BO3") if "BO3" in bo_options else 0
-            bo_choice = st.selectbox("BO type", bo_options, index=default_idx, key=f"bo_type_{team_id}")
-            df_sel = df_team[df_team["bo_type"] == bo_choice]
-
-            if not df_sel.empty:
-                df_sel = df_sel.copy()
-                df_sel["map_label"] = df_sel["map_num"].apply(lambda x: f"Map {x}")
-                chart_series = (
-                    alt.Chart(df_sel)
-                    .mark_bar()
-                    .encode(
-                        x=alt.X("map_label:N", axis=alt.Axis(title="Map num", labelFontSize=18, titleFontSize=18, labelAngle=0)),
-                        y=alt.Y("winrate:Q", axis=alt.Axis(title="Winrate", labelFontSize=18, titleFontSize=18)),
-                        tooltip=["map_num", "map_label", alt.Tooltip("winrate:Q", format=".3f"), "maps_played"],
-                    )
-                )
-                text_series = chart_series.mark_text(dy=-8, color="black", size=22).encode(text=alt.Text("winrate:Q", format=".1%"))
-                st.altair_chart(chart_series + text_series, use_container_width=True)
-
-                with st.expander("Full table (winrate by map_num)", expanded=False):
-                    st.dataframe(df_sel[["map_num", "winrate", "maps_played"]])
-
-               
-        else:
-            st.info("No series data for this team.")
-    else:
-        st.info("No series metrics (run make precompute).")
-
-    # Elo history
-    elo_hist = metrics.get("elo_hist")
-    elo_latest = metrics.get("elo_latest")
-    if elo_hist is not None and not elo_hist.is_empty():
-        st.subheader("Elo history")
-        current_elo = None
-        current_rank = None
-        if elo_latest is not None and not elo_latest.is_empty():
-            cur = elo_latest.filter(pl.col("team_id") == team_id)
-            if not cur.is_empty():
-                current_elo = cur["elo"][0]
-                if "elo_rank" in cur.columns:
-                    current_rank = cur["elo_rank"][0]
-        if current_elo is not None:
-            rank_txt = f" (rank #{int(current_rank)})" if current_rank is not None else ""
-            st.markdown(f"<h2 style='margin-top:-10px;'>Elo: {current_elo:.1f}{rank_txt}</h2>", unsafe_allow_html=True)
-        df_elo = elo_history_for_team(elo_hist, team_id)
-        if not df_elo.empty:
-            st.line_chart(df_elo.set_index("start_dt")["rating_post"])
-        else:
-            st.info("No Elo history for this team.")
-    else:
-        st.info("No Elo metrics.")
-
-
-        # Histogram + Gaussian overlay so something is always visible
-        bins = 25
-        hist, edges = np.histogram(durations, bins=bins, density=True)
-        hist_df = pd.DataFrame({"duration_min": edges[:-1], "density": hist})
-        charts = []
-        hist_chart = (
-            alt.Chart(hist_df)
-            .mark_bar(opacity=0.4)
-            .encode(
-                x=alt.X("duration_min:Q", bin=alt.Bin(binned=True, step=(edges[1] - edges[0])), title="Match duration (min)"),
-                y=alt.Y("density:Q", title="Density"),
-                tooltip=[alt.Tooltip("duration_min:Q", format=".1f"), alt.Tooltip("density:Q", format=".3f")],
-            )
-        )
-        charts.append(hist_chart)
-        if std > 0:
-            x_min = max(0.0, float(np.min(durations)) - 5)
-            x_max = float(np.max(durations)) + 5
-            x_vals = np.linspace(x_min, x_max, 200)
-            pdf = (1 / (std * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x_vals - mean) / std) ** 2)
-            gauss_df = pd.DataFrame({"duration_min": x_vals, "pdf": pdf})
-            gauss_chart = (
-                alt.Chart(gauss_df)
-                .mark_line(color="firebrick", strokeWidth=2)
-                .encode(
-                    x=alt.X("duration_min:Q", title="Match duration (min)"),
-                    y=alt.Y("pdf:Q", title="Density"),
-                    tooltip=[alt.Tooltip("duration_min:Q", format=".1f"), alt.Tooltip("pdf:Q", format=".3f")],
-                )
-            )
-            charts.append(gauss_chart)
-        # Threshold markers
-        rules_df = pd.DataFrame({"duration_min": thresholds, "label": [f"{t} min" for t in thresholds]})
-        rule_chart = (
-            alt.Chart(rules_df)
-            .mark_rule(color="gray", strokeDash=[4, 4])
-            .encode(x="duration_min:Q", tooltip=["label"])
-        )
-        charts.append(rule_chart)
-
-        combo = charts[0]
-        for ch in charts[1:]:
-            combo = combo + ch
-        st.altair_chart(combo, use_container_width=True)
-
-        # Rank-range comparison moved to top section
-
+    
 
 def main():
     st.set_page_config(page_title="Dota Data Dashboard v2", layout="wide")
