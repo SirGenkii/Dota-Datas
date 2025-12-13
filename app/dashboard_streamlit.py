@@ -1302,7 +1302,7 @@ def team_block(
                                 "Inclure les matchs contre des équipes hors range (combo/aegis)",
                                 value=True,
                                 key=f"include_cross_range_combo_{team_id}_{title}",
-                                help="Quand décoché, seules les rencontres où l'adversaire est aussi dans la fenêtre de rang sont gardées pour ce bloc.",
+                                help="When unchecked, only games where the opponent is also inside the rank window are kept for this block.",
                             )
 
             agg_global_rows = aggregate_range_metrics(teams_in_range, include_outside_combo)
@@ -1458,7 +1458,7 @@ def team_block(
                 combo = charts[0]
                 for ch in charts[1:]:
                     combo = combo + ch
-                with st.expander("Voir l'histogramme des durées (rank-range)", expanded=False):
+                with st.expander("View duration histogram (rank-range)", expanded=False):
                     st.altair_chart(combo, use_container_width=True)
 
 
@@ -1466,10 +1466,10 @@ def team_block(
 
         # Duration view for all games of teams in the rank window
         include_outside_dur_all = st.checkbox(
-            "Inclure les matchs hors range pour les durées (teams in range)",
+            "Include out-of-range opponents for durations (teams in range)",
             value=True,
             key=f"include_cross_range_dur_all_{team_id}_{title}",
-            help="Quand décoché, seules les rencontres où l'adversaire est aussi dans la fenêtre de rang sont gardées pour ce bloc.",
+            help="When unchecked, only games where the opponent is also inside the rank window are kept for this block.",
         )
         dur_range_all = durations_for_teams_in_rank_range(
             teams_in_range,
@@ -1538,7 +1538,7 @@ def team_block(
             combo = charts[0]
             for ch in charts[1:]:
                 combo = combo + ch
-            with st.expander("Voir l'histogramme des durées (teams in range)", expanded=False):
+            with st.expander("View duration histogram (teams in range)", expanded=False):
                 st.altair_chart(combo, use_container_width=True)
 
 # Series stats by BO type
