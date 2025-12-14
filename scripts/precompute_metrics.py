@@ -646,6 +646,7 @@ def compute_series_maps(matches: pl.DataFrame, tracked_ids: List[int]) -> Tuple[
             [],
             schema={
                 "series_id": pl.Int64,
+                "leagueid": pl.Int64,
                 "series_type": pl.Int64,
                 "map_num": pl.Int64,
                 "match_id": pl.Int64,
@@ -667,24 +668,13 @@ def compute_series_maps(matches: pl.DataFrame, tracked_ids: List[int]) -> Tuple[
         )
         return empty_series, empty_team
 
-    max_maps = {0: 1, 1: 3, 2: 5, 3: 2}  # BO1, BO3, BO5, BO2
-
     series_maps = (
-        series_matches.sort(["series_id", "start_time", "match_id"])
-        .with_columns(
-            [
-                pl.col("match_id").cum_count().over("series_id").alias("map_num"),
-                pl.col("series_type").map_elements(lambda x: max_maps.get(x)).alias("max_maps"),
-            ]
-        )
-        .filter(
-            pl.when(pl.col("max_maps").is_not_null())
-            .then(pl.col("map_num") <= pl.col("max_maps"))
-            .otherwise(True)
-        )
+        series_matches.sort(["series_id", "leagueid", "start_time", "match_id"])
+        .with_columns(pl.col("match_id").cum_count().over(["series_id", "leagueid"]).alias("map_num"))
     )
     series_maps = series_maps.select(
         "series_id",
+        "leagueid",
         "series_type",
         "map_num",
         "match_id",

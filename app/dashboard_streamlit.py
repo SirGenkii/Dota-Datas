@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Dict, Iterable, Optional, Tuple, List, Any
 from datetime import datetime
 
 import pandas as pd
@@ -743,6 +743,81 @@ def series_stats_for_team(series_team: pl.DataFrame, team_id: int) -> pl.DataFra
     if series_team is None or series_team.is_empty():
         return pl.DataFrame([])
     return series_team.filter(pl.col("team_id") == team_id)
+
+
+def series_winner_map_share(
+    matches: pl.DataFrame,
+    elo_latest: Optional[pl.DataFrame],
+    bo_type: int,
+    rank_min: int,
+    rank_max: int,
+    require_both_in_range: bool,
+) -> List[Dict[str, Any]]:
+    """For a given BO type, compute how often the series winner wins map 1, 2, ... within a rank window."""
+    if matches is None or matches.is_empty() or elo_latest is None or elo_latest.is_empty():
+        return []
+    needed_cols = {"series_id", "series_type", "radiant_team_id", "dire_team_id", "radiant_win", "start_time"}
+    if not needed_cols.issubset(matches.columns):
+        return []
+    rank_map = {int(r["team_id"]): r.get("elo_rank") for r in elo_latest.iter_rows(named=True) if r.get("team_id") is not None}
+    max_maps_for_bo = {0: 1, 1: 3, 2: 5, 3: 2}
+    max_maps = max_maps_for_bo.get(bo_type)
+    share: Dict[int, Dict[str, float]] = {}
+    series_df = matches.filter(pl.col("series_type") == bo_type)
+    for df in series_df.partition_by("series_id", as_dict=False, maintain_order=True):
+        if df.is_empty():
+            continue
+        rows = df.sort("start_time").to_dicts()
+        if max_maps is not None and len(rows) > max_maps:
+            rows = rows[:max_maps]  # cap to expected number of maps for the BO type
+        teams = set()
+        for r in rows:
+            rid = r.get("radiant_team_id")
+            did = r.get("dire_team_id")
+            if rid is not None:
+                teams.add(int(rid))
+            if did is not None:
+                teams.add(int(did))
+        if len(teams) != 2:
+            continue
+        teams = list(teams)
+        team_ranks = [rank_map.get(t) for t in teams]
+        in_range_flags = [rk is not None and rank_min <= rk <= rank_max for rk in team_ranks]
+        if require_both_in_range:
+            if not all(in_range_flags):
+                continue
+        else:
+            if not any(in_range_flags):
+                continue
+
+        win_count: Dict[int, int] = {teams[0]: 0, teams[1]: 0}
+        for r in rows:
+            rid = int(r.get("radiant_team_id"))
+            did = int(r.get("dire_team_id"))
+            winner = rid if r.get("radiant_win") else did
+            win_count[winner] = win_count.get(winner, 0) + 1
+        series_winner = None
+        if win_count[teams[0]] != win_count[teams[1]]:
+            series_winner = teams[0] if win_count[teams[0]] > win_count[teams[1]] else teams[1]
+
+        for idx, r in enumerate(rows, start=1):
+            rid = int(r.get("radiant_team_id"))
+            did = int(r.get("dire_team_id"))
+            map_winner = rid if r.get("radiant_win") else did
+            entry = share.setdefault(idx, {"maps": 0, "won_by_series_winner": 0})
+            entry["maps"] += 1
+            if series_winner is not None and map_winner == series_winner:
+                entry["won_by_series_winner"] += 1
+
+    out: List[Dict[str, Any]] = []
+    for map_num in sorted(share.keys()):
+        data = share[map_num]
+        maps = data["maps"]
+        if maps <= 0:
+            continue
+        pct = data["won_by_series_winner"] / maps if maps else None
+        out.append({"map_num": map_num, "win_pct": pct, "maps": maps})
+    return out
 
 
 def pick_outcomes_for_team(df: pl.DataFrame, team_id: int) -> pl.DataFrame:
@@ -1574,7 +1649,91 @@ def team_block(
                 with st.expander("Full table (winrate by map_num)", expanded=False):
                     st.dataframe(df_sel[["map_num", "winrate", "maps_played"]])
 
-               
+            # Series winner map win rate for teams in rank window
+            st.subheader("Series winner map win rate (rank-range)")
+            st.markdown("<p style='font-size:18px;'>How often the winner of the serie also win map number 1,2,3 etc..</p>", unsafe_allow_html=True)
+
+            max_rank_series = int(elo_latest["elo_rank"].max()) if elo_latest is not None and "elo_rank" in elo_latest.columns else 50
+            series_range_key = f"rank_range_series_{team_id}_{title}"
+            default_low_series = max(1, int(current_rank - 5)) if current_rank is not None else 1
+            default_high_series = min(max_rank_series, int(current_rank + 5)) if current_rank is not None else min(50, max_rank_series)
+            range_default_series = st.session_state.get(series_range_key, (default_low_series, default_high_series))
+
+            col_reset_series = st.columns([1, 4])[0]
+            with col_reset_series:
+                if st.button("All ranks", key=f"all_ranks_series_{team_id}_{title}"):
+                    range_default_series = (1, max_rank_series)
+                    st.session_state[series_range_key] = range_default_series
+
+            slider_kwargs = {
+                "label": "Rank range (series maps)",
+                "min_value": 1,
+                "max_value": max_rank_series,
+                "step": 1,
+                "key": series_range_key,
+            }
+            if series_range_key not in st.session_state:
+                slider_kwargs["value"] = range_default_series
+            rank_range_series = st.slider(**slider_kwargs)
+            include_outside_series = st.checkbox(
+                "Include out-of-range opponents (series maps)",
+                value=True,
+                key=f"include_outside_series_maps_{team_id}_{title}",
+                help="When unchecked, only series where both teams are inside the rank window are kept.",
+            )
+            bo_labels = sorted(bo_map.values())
+            bo_choice_label = st.selectbox(
+                "BO type (series maps)",
+                bo_labels,
+                index=bo_labels.index("BO3") if "BO3" in bo_labels else 0,
+                key=f"series_map_bo_{team_id}_{title}",
+            )
+            inv_bo = {v: k for k, v in bo_map.items()}
+            bo_choice_code = inv_bo.get(bo_choice_label, 1)
+            shares = series_winner_map_share(
+                matches_raw,
+                metrics.get("elo_latest"),
+                bo_type=bo_choice_code,
+                rank_min=rank_range_series[0],
+                rank_max=rank_range_series[1],
+                require_both_in_range=not include_outside_series,
+            )
+            total_maps = sum(r["maps"] for r in shares) if shares else 0
+            st.caption(f"Ranks [{rank_range_series[0]}, {rank_range_series[1]}] — {int(total_maps)} maps")
+            if not shares:
+                st.info("No series data in this rank window for the selected BO type.")
+            else:
+                df_share = pd.DataFrame(shares)
+                df_share["Series winner win %"] = df_share["win_pct"].apply(lambda v: f"{v*100:.1f}%" if pd.notnull(v) else "N/A")
+                chart_share = (
+                    alt.Chart(df_share.assign(map_label=df_share["map_num"].apply(lambda m: f"Map {int(m)}")))
+                    .mark_bar()
+                    .encode(
+                        x=alt.X(
+                            "map_label:N",
+                            title="Map #",
+                            axis=alt.Axis(labelAngle=0, labelFontSize=18, titleFontSize=18),
+                        ),
+                        y=alt.Y(
+                            "win_pct:Q",
+                            title="Win % (series winner)",
+                            axis=alt.Axis(format=".0%", labelFontSize=18, titleFontSize=18),
+                        ),
+                        tooltip=[
+                            alt.Tooltip("map_num:O", title="Map #"),
+                            alt.Tooltip("win_pct:Q", title="Win %", format=".1%"),
+                            alt.Tooltip("maps:Q", title="Maps"),
+                        ],
+                    )
+                )
+
+                text_share = chart_share.mark_text(dy=-8, color="black", size=22).encode(text=alt.Text("win_pct:Q", format=".1%"))
+                st.altair_chart(chart_share + text_share, use_container_width=True)
+                
+                with st.expander("Full table", expanded=False):
+                    st.dataframe(df_share[["map_num", "Series winner win %", "maps"]].rename(columns={"map_num": "Map #"}), use_container_width=True)
+
+
         else:
             st.info("No series data for this team.")
     else:
