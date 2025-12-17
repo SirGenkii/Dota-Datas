@@ -13,6 +13,8 @@ from src.dota_data import (
     build_team_dictionary,
 )
 
+SERIES_OVERRIDE_PATH = Path("data/mappings/series_overrides.csv")
+
 ADV_BUCKET_MINUTES = (5, 10, 12, 15, 20)
 ADV_BUCKETS = [-10_000, -5_000, -1_000, 0, 1_000, 5_000, 10_000, 999_999]
 
@@ -676,6 +678,7 @@ def compute_series_maps(matches: pl.DataFrame, tracked_ids: List[int]) -> Tuple[
         "series_id",
         "leagueid",
         "series_type",
+        "bo_type",
         "map_num",
         "match_id",
         "start_time",
@@ -695,19 +698,80 @@ def compute_series_maps(matches: pl.DataFrame, tracked_ids: List[int]) -> Tuple[
                     "team_id": team_id,
                     "map_num": row["map_num"],
                     "team_win": team_win,
-                    "series_type": row.get("series_type"),
+                    "series_type": row.get("bo_type") if row.get("bo_type") is not None else row.get("series_type"),
+                    "bo_type": row.get("bo_type"),
                 }
             )
     team_stats = (
         pl.DataFrame(rows, strict=False)
-        .group_by(["team_id", "map_num", "series_type"])
+        .group_by(["team_id", "map_num", "bo_type"])
         .agg(
             pl.col("team_win").mean().alias("winrate"),
             pl.len().alias("maps_played"),
         )
-        .sort(["team_id", "series_type", "map_num"])
+        .sort(["team_id", "bo_type", "map_num"])
     )
     return series_maps, team_stats
+
+
+def apply_series_overrides(matches: pl.DataFrame, overrides_path: Path = SERIES_OVERRIDE_PATH) -> pl.DataFrame:
+    """
+    Apply manual overrides for specific (leagueid, series_id), e.g. finals played in BO5 or LAN.
+    Override columns supported: override_bo_type, override_series_type (legacy), override_tournament_tier, override_tournament_location.
+    """
+    if not overrides_path.exists():
+        return matches
+    overrides = pl.read_csv(overrides_path)
+    if overrides.is_empty():
+        return matches
+    needed = {"leagueid", "series_id"}
+    if not needed.issubset(overrides.columns):
+        return matches
+    ov_cols = [
+        c
+        for c in overrides.columns
+        if c
+        in {
+            "leagueid",
+            "series_id",
+            "override_bo_type",
+            "override_series_type",
+            "override_tournament_tier",
+            "override_tournament_location",
+        }
+    ]
+    ov = overrides.select(ov_cols)
+    # Ensure expected columns exist
+    base = matches
+    for col in ["bo_type", "series_type_raw", "series_type"]:
+        if col not in base.columns:
+            base = base.with_columns(pl.lit(None).alias(col))
+    joined = base.join(ov, on=["leagueid", "series_id"], how="left")
+    # Drop existing series_type to avoid duplicate names when overriding
+    base = joined.drop(["series_type"]) if "series_type" in joined.columns else joined
+    out = base.with_columns(
+        pl.coalesce([pl.col("override_bo_type"), pl.col("override_series_type"), pl.col("bo_type")]).alias("bo_type"),
+        pl.coalesce([pl.col("override_series_type"), pl.col("series_type_raw"), pl.col("bo_type")]).alias("series_type_tmp"),
+        pl.coalesce([pl.col("override_tournament_tier"), pl.col("tournament_tier")]).alias("tournament_tier"),
+        pl.coalesce([pl.col("override_tournament_location"), pl.col("tournament_location")]).alias("tournament_location"),
+    )
+    out = out.with_columns(pl.coalesce([pl.col("bo_type"), pl.col("series_type_tmp")]).alias("series_type"))
+    out = out.with_columns(
+        pl.col("bo_type").cast(pl.Int64, strict=False),
+        pl.col("series_type").cast(pl.Int64, strict=False),
+    )
+    drop_cols = [
+        c
+        for c in [
+            "override_bo_type",
+            "override_series_type",
+            "override_tournament_tier",
+            "override_tournament_location",
+            "series_type_tmp",
+        ]
+        if c in out.columns
+    ]
+    return out.drop(drop_cols)
 
 
 def main():
@@ -726,10 +790,12 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     tables = read_processed_tables(processed_dir)
-    matches_raw = tables["matches"]
+    matches_raw = apply_series_overrides(tables["matches"], overrides_path=SERIES_OVERRIDE_PATH)
     objectives = tables["objectives"]
 
     teams_csv = pl.read_csv(args.teams)
+    # normalize column names (strip spaces)
+    teams_csv = teams_csv.rename({c: c.strip() for c in teams_csv.columns})
     team_ids = teams_csv["TeamID"].to_list()
     teams_dict = build_team_dictionary(matches_raw)
     tracked_names = (

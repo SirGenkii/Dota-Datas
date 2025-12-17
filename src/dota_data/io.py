@@ -135,7 +135,81 @@ def matches_table(raw: Iterable[Dict[str, Any]], alias_map: Optional[Dict[int, i
         row["objectives_count"] = len(match.get("objectives", []))
         row["teamfights_count"] = len(match.get("teamfights", []))
         rows.append(row)
-    return _to_df(rows)
+    df = _to_df(rows)
+
+    # Infer BO type from actual maps played per (series_id, leagueid) using wins and match_count.
+    if "series_id" in df.columns and "leagueid" in df.columns:
+        if "series_type" in df.columns:
+            df = df.with_columns(pl.col("series_type").alias("series_type_raw"))
+        # winner_team_id per match (None if radiant_win is null)
+        df = df.with_columns(
+            pl.when(pl.col("radiant_win") == True)
+            .then(pl.col("radiant_team_id"))
+            .when(pl.col("radiant_win") == False)
+            .then(pl.col("dire_team_id"))
+            .otherwise(None)
+            .alias("winner_team_id")
+        )
+        valid = df.filter(pl.col("series_id").is_not_null())
+        series_rows = []
+        for _, g in valid.group_by(["series_id", "leagueid"], maintain_order=True):
+            rows_g = g.to_dicts()
+            match_count = len(rows_g)
+            teams = []
+            for r in rows_g:
+                for k in ("radiant_team_id", "dire_team_id"):
+                    if r.get(k) is not None:
+                        tid = int(r[k])
+                        if tid not in teams:
+                            teams.append(tid)
+            teams_in_series = len(teams)
+            wins = {t: 0 for t in teams}
+            for r in rows_g:
+                w = r.get("winner_team_id")
+                if w is not None:
+                    wins[w] = wins.get(w, 0) + 1
+            max_wins = max(wins.values()) if wins else 0
+            series_type_raw = rows_g[0].get("series_type_raw")
+            # Infer bo_type based on wins and match_count
+            if match_count >= 5 or max_wins >= 3:
+                bo_type = 5
+            elif match_count == 4:
+                bo_type = 5
+            elif match_count == 3:
+                bo_type = 5 if max_wins == 3 else 3
+            elif match_count == 2:
+                if wins and list(wins.values()).count(1) == 2:
+                    bo_type = 2  # 1-1 likely BO2
+                elif series_type_raw == 3:
+                    bo_type = 2
+                else:
+                    bo_type = 3
+            elif match_count == 1:
+                bo_type = 1
+            else:
+                bo_type = None
+            series_rows.append(
+                {
+                    "series_id": rows_g[0].get("series_id"),
+                    "leagueid": rows_g[0].get("leagueid"),
+                    "bo_type": bo_type,
+                    "teams_in_series": teams_in_series,
+                    "series_type_raw": series_type_raw,
+                }
+            )
+        if series_rows:
+            series_df = pl.DataFrame(series_rows, strict=False)
+            df = df.join(series_df, on=["series_id", "leagueid"], how="left")
+            # Keep bo_type explicit; maintain series_type as inferred for compatibility
+            df = df.with_columns(pl.coalesce([pl.col("bo_type"), pl.col("series_type_raw")]).alias("series_type"))
+    # normalize dtypes
+    cast_cols = {}
+    for col in ["bo_type", "series_type", "series_type_raw"]:
+        if col in df.columns:
+            cast_cols[col] = pl.col(col).cast(pl.Int64, strict=False)
+    if cast_cols:
+        df = df.with_columns(list(cast_cols.values()))
+    return df
 
 
 def players_table(raw: Iterable[Dict[str, Any]]) -> pl.DataFrame:
@@ -229,8 +303,83 @@ def summarize_raw(raw: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def series_summary_table(matches: pl.DataFrame) -> pl.DataFrame:
+    """Build a per-series summary (score, bo_type, teams, timings)."""
+    if matches is None or matches.is_empty() or "series_id" not in matches.columns:
+        return pl.DataFrame([], schema={})
+    rows = []
+    for _, g in matches.filter(pl.col("series_id").is_not_null()).group_by(["series_id", "leagueid"], maintain_order=True):
+        rows_g = g.to_dicts()
+        if not rows_g:
+            continue
+        match_count = len(rows_g)
+        leagueid = rows_g[0].get("leagueid")
+        league_name = rows_g[0].get("league_name")
+        tournament_name = rows_g[0].get("tournament_name")
+        tournament_slug = rows_g[0].get("tournament_slug")
+        tournament_tier = rows_g[0].get("tournament_tier")
+        tournament_location = rows_g[0].get("tournament_location")
+        series_type_raw = rows_g[0].get("series_type_raw")
+        bo_type = rows_g[0].get("bo_type")
+        start_min = min(r.get("start_time", 0) or 0 for r in rows_g)
+        start_max = max(r.get("start_time", 0) or 0 for r in rows_g)
+        teams = []
+        for r in rows_g:
+            for k in ("radiant_team_id", "dire_team_id"):
+                if r.get(k) is not None:
+                    tid = int(r[k])
+                    if tid not in teams:
+                        teams.append(tid)
+        teams_in_series = len(teams)
+        wins = {t: 0 for t in teams}
+        for r in rows_g:
+            win_tid = None
+            if r.get("radiant_win") is True:
+                win_tid = r.get("radiant_team_id")
+            elif r.get("radiant_win") is False:
+                win_tid = r.get("dire_team_id")
+            if win_tid is not None:
+                wins[int(win_tid)] = wins.get(int(win_tid), 0) + 1
+        winner_team_id = None
+        max_wins = 0
+        if wins:
+            winner_team_id = max(wins, key=wins.get)
+            max_wins = wins[winner_team_id]
+        score_team_a = score_team_b = None
+        team_a = teams[0] if teams else None
+        team_b = teams[1] if teams_in_series >= 2 else None
+        if team_a is not None and team_b is not None:
+            score_team_a = wins.get(team_a, 0)
+            score_team_b = wins.get(team_b, 0)
+        rows.append(
+            {
+                "series_id": rows_g[0].get("series_id"),
+                "leagueid": leagueid,
+                "league_name": league_name,
+                "tournament_name": tournament_name,
+                "tournament_slug": tournament_slug,
+                "tournament_tier": tournament_tier,
+                "tournament_location": tournament_location,
+                "series_type_raw": series_type_raw,
+                "bo_type": bo_type,
+                "match_count": match_count,
+                "teams": teams,
+                "teams_in_series": teams_in_series,
+                "team_a": team_a,
+                "team_b": team_b,
+                "score_team_a": score_team_a,
+                "score_team_b": score_team_b,
+                "winner_team_id": winner_team_id,
+                "max_wins": max_wins,
+                "start_time_min": start_min,
+                "start_time_max": start_max,
+            }
+        )
+    return pl.DataFrame(rows, strict=False)
+
+
 def write_parquet_tables(raw_path: Path | str, output_dir: Path | str, alias_path: Optional[Path] = None) -> Dict[str, Path]:
-    """Generate parquet tables for matches, players, objectives, and teamfights."""
+    """Generate parquet tables for matches, players, objectives, teamfights, and series summaries."""
     raw = load_raw_matches(raw_path)
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -242,6 +391,7 @@ def write_parquet_tables(raw_path: Path | str, output_dir: Path | str, alias_pat
         "objectives": objectives_table(raw),
         "teamfights": teamfights_table(raw),
     }
+    tables["series"] = series_summary_table(tables["matches"])
 
     paths: Dict[str, Path] = {}
     for name, df in tables.items():
