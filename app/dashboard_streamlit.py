@@ -1504,7 +1504,8 @@ def team_block(
             opponent_team_id=opponent_team_id,
             include_outside_opponents=False,
         )
-        st.markdown(f"<p>Ranks [{rank_range_duration[0]}, {rank_range_duration[1]}] — {int(len(dur_range))} games</p>", unsafe_allow_html=True)
+        games_count = len(dur_range) if dur_range is not None else 0
+        st.markdown(f"<p>Ranks [{rank_range_duration[0]}, {rank_range_duration[1]}] — {games_count} games</p>", unsafe_allow_html=True)
 
         if dur_range is None or len(dur_range) == 0:
             st.info("No duration data in this rank range.")

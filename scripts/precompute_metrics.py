@@ -4,7 +4,7 @@ import argparse
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import polars as pl
 
@@ -650,6 +650,7 @@ def compute_series_maps(matches: pl.DataFrame, tracked_ids: List[int]) -> Tuple[
                 "series_id": pl.Int64,
                 "leagueid": pl.Int64,
                 "series_type": pl.Int64,
+                "bo_type": pl.Int64,
                 "map_num": pl.Int64,
                 "match_id": pl.Int64,
                 "start_time": pl.Int64,
@@ -665,52 +666,132 @@ def compute_series_maps(matches: pl.DataFrame, tracked_ids: List[int]) -> Tuple[
                 "map_num": pl.Int64,
                 "winrate": pl.Float64,
                 "maps_played": pl.Int64,
-                "series_type_sample": pl.Int64,
+                "bo_type": pl.Int64,
             },
         )
         return empty_series, empty_team
 
-    series_maps = (
-        series_matches.sort(["series_id", "leagueid", "start_time", "match_id"])
-        .with_columns(pl.col("match_id").cum_count().over(["series_id", "leagueid"]).alias("map_num"))
-    )
-    series_maps = series_maps.select(
-        "series_id",
-        "leagueid",
-        "series_type",
-        "bo_type",
-        "map_num",
-        "match_id",
-        "start_time",
-        "radiant_team_id",
-        "dire_team_id",
-        "radiant_win",
-    )
+    max_maps_by_bo = {1: 1, 2: 2, 3: 3, 5: 5}
+    required_wins_by_bo = {1: 1, 2: 1, 3: 2, 5: 3}
 
-    rows = []
-    for row in series_maps.iter_rows(named=True):
-        for team_id, is_rad in ((row["radiant_team_id"], True), (row["dire_team_id"], False)):
-            if team_id not in tracked_ids:
-                continue
-            team_win = row["radiant_win"] if is_rad else (1 - int(row["radiant_win"]))
-            rows.append(
+    series_rows: List[Dict[str, Any]] = []
+    team_rows: List[Dict[str, Any]] = []
+
+    def first_non_null(df: pl.DataFrame, col: str) -> Optional[int]:
+        if col not in df.columns:
+            return None
+        vals = [v for v in df[col].to_list() if v is not None]
+        return int(vals[0]) if vals else None
+
+    for (_sid, _lid), df in series_matches.group_by(["series_id", "leagueid"], maintain_order=True):
+        df_sorted = df.sort(["start_time", "match_id"])
+        bo_val = first_non_null(df_sorted, "bo_type")
+        series_type_val = first_non_null(df_sorted, "series_type")
+        if bo_val not in max_maps_by_bo:
+            bo_val = series_type_val if series_type_val in max_maps_by_bo else None
+        if bo_val is None:
+            # Can't reason about this series BO reliably
+            continue
+
+        teams: set[int] = set()
+        for rid, did in zip(df_sorted["radiant_team_id"], df_sorted["dire_team_id"]):
+            if rid is not None:
+                teams.add(int(rid))
+            if did is not None:
+                teams.add(int(did))
+        if len(teams) != 2:
+            # Ignore malformed series with more/less than two teams
+            continue
+
+        if df_sorted.height > max_maps_by_bo.get(bo_val, df_sorted.height):
+            # Skip series that exceed allowed map count for their BO
+            continue
+
+        team_list = list(teams)
+        win_count = {team_list[0]: 0, team_list[1]: 0}
+        for rw, rid, did in zip(df_sorted["radiant_win"], df_sorted["radiant_team_id"], df_sorted["dire_team_id"]):
+            winner = int(rid) if rw else int(did)
+            win_count[winner] = win_count.get(winner, 0) + 1
+
+        needed = required_wins_by_bo.get(bo_val, 1)
+        if max(win_count.values()) < needed:
+            # Incomplete series (no one reached required wins)
+            continue
+        if win_count[team_list[0]] == win_count[team_list[1]]:
+            # Drawn series -> disregard for BO stats
+            continue
+
+        # Persist ordered maps
+        for idx, row in enumerate(df_sorted.iter_rows(named=True), start=1):
+            series_rows.append(
                 {
-                    "team_id": team_id,
-                    "map_num": row["map_num"],
-                    "team_win": team_win,
-                    "series_type": row.get("bo_type") if row.get("bo_type") is not None else row.get("series_type"),
-                    "bo_type": row.get("bo_type"),
+                    "series_id": row["series_id"],
+                    "leagueid": row["leagueid"],
+                    "series_type": series_type_val,
+                    "bo_type": bo_val,
+                    "map_num": idx,
+                    "match_id": row["match_id"],
+                    "start_time": row["start_time"],
+                    "radiant_team_id": row["radiant_team_id"],
+                    "dire_team_id": row["dire_team_id"],
+                    "radiant_win": row["radiant_win"],
                 }
             )
-    team_stats = (
-        pl.DataFrame(rows, strict=False)
-        .group_by(["team_id", "map_num", "bo_type"])
-        .agg(
-            pl.col("team_win").mean().alias("winrate"),
-            pl.len().alias("maps_played"),
+
+            map_winner = row["radiant_team_id"] if row["radiant_win"] else row["dire_team_id"]
+            for team_id in (row["radiant_team_id"], row["dire_team_id"]):
+                if team_id is None or team_id not in tracked_ids:
+                    continue
+                team_rows.append(
+                    {
+                        "team_id": int(team_id),
+                        "map_num": idx,
+                        "team_win": 1 if map_winner == team_id else 0,
+                        "bo_type": bo_val,
+                    }
+                )
+
+    if series_rows:
+        series_maps = pl.DataFrame(series_rows)
+    else:
+        series_maps = pl.DataFrame(
+            [],
+            schema={
+                "series_id": pl.Int64,
+                "leagueid": pl.Int64,
+                "series_type": pl.Int64,
+                "bo_type": pl.Int64,
+                "map_num": pl.Int64,
+                "match_id": pl.Int64,
+                "start_time": pl.Int64,
+                "radiant_team_id": pl.Int64,
+                "dire_team_id": pl.Int64,
+                "radiant_win": pl.Boolean,
+            },
         )
-        .sort(["team_id", "bo_type", "map_num"])
-    )
+
+    if team_rows:
+        team_stats = (
+            pl.DataFrame(team_rows, strict=False)
+            .group_by(["team_id", "map_num", "bo_type"])
+            .agg(
+                pl.col("team_win").mean().alias("winrate"),
+                pl.len().alias("maps_played"),
+            )
+            .sort(["team_id", "bo_type", "map_num"])
+        )
+    else:
+        team_stats = pl.DataFrame(
+            [],
+            schema={
+                "team_id": pl.Int64,
+                "map_num": pl.Int64,
+                "winrate": pl.Float64,
+                "maps_played": pl.Int64,
+                "bo_type": pl.Int64,
+            },
+        )
+
     return series_maps, team_stats
 
 

@@ -2,7 +2,7 @@
 .venv
 data/
 data.zip
-
+_data.zip
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
