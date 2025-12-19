@@ -786,10 +786,14 @@ def series_winner_map_share(
         if len(teams) != 2:
                 continue
         teams = list(teams)
+        team_ranks = [rank_map.get(t) for t in teams]
+        in_range_flags = [rk is not None and rank_min <= rk <= rank_max for rk in team_ranks]
         if require_both_in_range:
-            team_ranks = [rank_map.get(t) for t in teams]
-            in_range_flags = [rk is not None and rank_min <= rk <= rank_max for rk in team_ranks]
             if not all(in_range_flags):
+                continue
+        else:
+            # include_outside=True: keep series if at least one team is in range
+            if not any(in_range_flags):
                 continue
 
         win_count: Dict[int, int] = {teams[0]: 0, teams[1]: 0}
@@ -863,10 +867,13 @@ def series_score_distribution(
         if len(teams) != 2:
             continue
         teams = list(teams)
+        team_ranks = [rank_map.get(t) for t in teams]
+        in_range_flags = [rk is not None and rank_min <= rk <= rank_max for rk in team_ranks]
         if require_both_in_range:
-            team_ranks = [rank_map.get(t) for t in teams]
-            in_range_flags = [rk is not None and rank_min <= rk <= rank_max for rk in team_ranks]
             if not all(in_range_flags):
+                continue
+        else:
+            if not any(in_range_flags):
                 continue
 
         win_count: Dict[int, int] = {teams[0]: 0, teams[1]: 0}
@@ -1300,10 +1307,23 @@ def team_block(
                 return f"{val*100:.3f}%" if pd.notnull(val) else "N/A"
             rows = []
             for lbl in order:
-                sub = df[df["label"] == label_map.get(lbl, lbl)]
+                label_val = label_map.get(lbl, lbl)
+                sub = df[df["label"] == label_val]
                 if sub.empty:
-                    continue
-                r = sub.iloc[0]
+                    r = {
+                        "label": label_val,
+                        "first_blood_rate": None,
+                        "first_tower_rate": None,
+                        "first_roshan_rate": None,
+                        "winrate": None,
+                        "combo_for_rate": None,
+                        "combo_against_rate": None,
+                        "aegis_steal_rate": None,
+                        "aegis_steal_against_rate": None,
+                        "matches": 0,
+                    }
+                else:
+                    r = sub.iloc[0]
                 rows.append(
                     {
                         "Context": r["label"],
@@ -1526,7 +1546,7 @@ def team_block(
                     .duration-card p {
                         margin: 4px 0 0 0;
                         color: #555d73;
-                        font-size: 18px;
+                        font-size: 17px;
                     }
                     .duration-header {
                         background: #eef3ff;
