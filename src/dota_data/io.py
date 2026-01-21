@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -51,11 +52,91 @@ def _slugify(text: str) -> Optional[str]:
 
 DEFAULT_TIER = "regular"
 DEFAULT_LOCATION = "online"
+LEAGUE_MAPPING_PATH = Path("data/mappings/league_mapping.csv")
+QUAL_PATTERNS = [
+    re.compile(pat, re.IGNORECASE)
+    for pat in [
+        r"qualifier",
+        r"closed qualifier",
+        r"open qualifier",
+        r"regional qualifier",
+        r"road to",
+        r"rtti",
+    ]
+]
+MAJOR_PATTERNS = [
+    re.compile(pat, re.IGNORECASE)
+    for pat in [
+        r"the international",
+        r"riyadh masters",
+        r"esl one",
+        r"dreamleague season",
+        r"pgl wallachia",
+        r"betboom dacha",
+        r"esports world cup",
+        r"apac predator league",
+        r"blast slam",
+        r"elite league",
+        r"games of future",
+    ]
+]
 
 
-def _infer_tournament_tags(tournament_name: Optional[str]) -> tuple[str, str]:
-    """Placeholder for tournament tier/location inference; defaults for now."""
-    # TODO: implement heuristic/mapping-based inference
+@lru_cache()
+def _load_league_mapping(path: str = str(LEAGUE_MAPPING_PATH)) -> Dict[int, Dict[str, str]]:
+    """Load league mapping {leagueid: {tier, location}}."""
+    p = Path(path)
+    if not p.exists():
+        return {}
+    try:
+        df = pl.read_csv(p)
+    except Exception:
+        return {}
+    out: Dict[int, Dict[str, str]] = {}
+    for row in df.iter_rows(named=True):
+        lid = row.get("leagueid")
+        if lid is None:
+            continue
+        try:
+            lid_int = int(lid)
+        except Exception:
+            continue
+        tier = (row.get("tier_inferred") or row.get("tier") or DEFAULT_TIER) or DEFAULT_TIER
+        location = (row.get("location_inferred") or row.get("location") or DEFAULT_LOCATION) or DEFAULT_LOCATION
+        out[lid_int] = {"tier": str(tier).lower(), "location": str(location).lower()}
+    return out
+
+
+def _infer_tournament_tags(
+    league_id: Any, tournament_name: Optional[str], league_raw: Any, league_map: Dict[int, Dict[str, str]]
+) -> tuple[str, str]:
+    """Infer tier/location from mapping, then heuristics, else defaults."""
+    # Mapping by league id
+    try:
+        lid = int(league_id) if league_id is not None else None
+    except Exception:
+        lid = None
+    if lid is not None and lid in league_map:
+        m = league_map[lid]
+        return m.get("tier", DEFAULT_TIER), m.get("location", DEFAULT_LOCATION)
+
+    # Use raw tier field if present
+    tier_field = None
+    if isinstance(league_raw, dict):
+        tier_field = league_raw.get("tier")
+    if tier_field == "premium":
+        return "major", "lan"
+
+    # Heuristics on name
+    name = tournament_name or ""
+    if any(p.search(name) for p in QUAL_PATTERNS):
+        return "qualifier", "online"
+    if any(p.search(name) for p in MAJOR_PATTERNS):
+        # DreamLeague est online; autres majors -> lan
+        if "dreamleague" in name.lower():
+            return "major", "online"
+        return "major", "lan"
+
     return DEFAULT_TIER, DEFAULT_LOCATION
 
 
@@ -117,12 +198,13 @@ def _map_team_id(team_id: Any, alias_map: Dict[int, int]) -> Any:
 def matches_table(raw: Iterable[Dict[str, Any]], alias_map: Optional[Dict[int, int]] = None) -> pl.DataFrame:
     """Flatten match-level info (no heavy nested arrays)."""
     alias_map = alias_map or {}
+    league_map = _load_league_mapping()
     rows: List[Dict[str, Any]] = []
     for entry in raw:
         match = entry.get("json", {})
         row = {k: _serialize_value(v) for k, v in match.items() if k not in EXCLUDED_MATCH_KEYS}
         league_name = _extract_league_name(match.get("league"))
-        tier, location = _infer_tournament_tags(league_name)
+        tier, location = _infer_tournament_tags(match.get("leagueid"), league_name, match.get("league"), league_map)
         row["league_name"] = league_name
         row["tournament_name"] = league_name
         row["tournament_slug"] = _slugify(league_name)
@@ -136,24 +218,42 @@ def matches_table(raw: Iterable[Dict[str, Any]], alias_map: Optional[Dict[int, i
         row["teamfights_count"] = len(match.get("teamfights", []))
         rows.append(row)
     df = _to_df(rows)
+    return infer_series_fields(df)
 
-    # Infer BO type from actual maps played per (series_id, leagueid) using wins and match_count.
+
+def infer_series_fields(matches: pl.DataFrame) -> pl.DataFrame:
+    """
+    Infer best-of type (bo_type) and normalized series_type for matches.
+
+    This is computed per (series_id, leagueid) using:
+    - number of maps actually played (match_count)
+    - wins per team derived from radiant_win
+    """
+    if matches is None or matches.is_empty():
+        return matches
+
+    df = matches
     if "series_id" in df.columns and "leagueid" in df.columns:
-        if "series_type" in df.columns:
+        if "series_type" in df.columns and "series_type_raw" not in df.columns:
             df = df.with_columns(pl.col("series_type").alias("series_type_raw"))
+
         # winner_team_id per match (None if radiant_win is null)
-        df = df.with_columns(
-            pl.when(pl.col("radiant_win") == True)
-            .then(pl.col("radiant_team_id"))
-            .when(pl.col("radiant_win") == False)
-            .then(pl.col("dire_team_id"))
-            .otherwise(None)
-            .alias("winner_team_id")
-        )
+        if "winner_team_id" not in df.columns and {"radiant_win", "radiant_team_id", "dire_team_id"}.issubset(set(df.columns)):
+            df = df.with_columns(
+                pl.when(pl.col("radiant_win") == True)
+                .then(pl.col("radiant_team_id"))
+                .when(pl.col("radiant_win") == False)
+                .then(pl.col("dire_team_id"))
+                .otherwise(None)
+                .alias("winner_team_id")
+            )
+
         valid = df.filter(pl.col("series_id").is_not_null())
         series_rows = []
         for _, g in valid.group_by(["series_id", "leagueid"], maintain_order=True):
             rows_g = g.to_dicts()
+            if not rows_g:
+                continue
             match_count = len(rows_g)
             teams = []
             for r in rows_g:
@@ -170,6 +270,7 @@ def matches_table(raw: Iterable[Dict[str, Any]], alias_map: Optional[Dict[int, i
                     wins[w] = wins.get(w, 0) + 1
             max_wins = max(wins.values()) if wins else 0
             series_type_raw = rows_g[0].get("series_type_raw")
+
             # Infer bo_type based on wins and match_count
             if match_count >= 5 or max_wins >= 3:
                 bo_type = 5
@@ -197,12 +298,12 @@ def matches_table(raw: Iterable[Dict[str, Any]], alias_map: Optional[Dict[int, i
                     "series_type_raw": series_type_raw,
                 }
             )
+
         if series_rows:
             series_df = pl.DataFrame(series_rows, strict=False)
             df = df.join(series_df, on=["series_id", "leagueid"], how="left")
-            # Keep bo_type explicit; maintain series_type as inferred for compatibility
             df = df.with_columns(pl.coalesce([pl.col("bo_type"), pl.col("series_type_raw")]).alias("series_type"))
-    # normalize dtypes
+
     cast_cols = {}
     for col in ["bo_type", "series_type", "series_type_raw"]:
         if col in df.columns:
@@ -398,6 +499,79 @@ def write_parquet_tables(raw_path: Path | str, output_dir: Path | str, alias_pat
         path = out_dir / f"{name}.parquet"
         df.write_parquet(path)
         paths[name] = path
+    return paths
+
+
+def load_raw_matches_from_files(paths: Iterable[Path | str]) -> List[Dict[str, Any]]:
+    """Load and concatenate multiple raw JSON files (each containing an array of wrapped matches)."""
+    out: List[Dict[str, Any]] = []
+    for p in paths:
+        try:
+            rows = load_raw_matches(p)
+        except Exception:
+            continue
+        if isinstance(rows, list):
+            out.extend([r for r in rows if isinstance(r, dict)])
+    return out
+
+
+def append_parquet_tables(
+    raw: Iterable[Dict[str, Any]],
+    output_dir: Path | str,
+    alias_path: Optional[Path] = None,
+) -> Dict[str, Path]:
+    """
+    Append a batch of raw matches to existing processed parquet tables.
+
+    This updates:
+    - matches.parquet (dedup by match_id, then re-infer series fields)
+    - players.parquet / objectives.parquet / teamfights.parquet (append)
+    - series.parquet (recomputed from the updated matches table)
+    """
+    raw_list = list(raw)
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    alias_map = load_alias_map(alias_path)
+
+    new_tables = {
+        "matches": matches_table(raw_list, alias_map=alias_map),
+        "players": players_table(raw_list),
+        "objectives": objectives_table(raw_list),
+        "teamfights": teamfights_table(raw_list),
+    }
+
+    paths: Dict[str, Path] = {}
+
+    # Matches: union + dedup + recompute series fields.
+    matches_path = out_dir / "matches.parquet"
+    if matches_path.exists():
+        old_matches = pl.read_parquet(matches_path)
+        merged_matches = pl.concat([old_matches, new_tables["matches"]], how="diagonal_relaxed")
+    else:
+        merged_matches = new_tables["matches"]
+    if "match_id" in merged_matches.columns:
+        merged_matches = merged_matches.unique(subset=["match_id"], keep="last")
+    merged_matches = infer_series_fields(merged_matches)
+    merged_matches.write_parquet(matches_path)
+    paths["matches"] = matches_path
+
+    # Other append-only tables.
+    for name in ["players", "objectives", "teamfights"]:
+        path = out_dir / f"{name}.parquet"
+        if path.exists():
+            old = pl.read_parquet(path)
+            merged = pl.concat([old, new_tables[name]], how="diagonal_relaxed")
+        else:
+            merged = new_tables[name]
+        merged.write_parquet(path)
+        paths[name] = path
+
+    # Series: recompute from full matches table.
+    series_df = series_summary_table(merged_matches)
+    series_path = out_dir / "series.parquet"
+    series_df.write_parquet(series_path)
+    paths["series"] = series_path
+
     return paths
 
 

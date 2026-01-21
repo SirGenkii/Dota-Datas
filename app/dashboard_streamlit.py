@@ -91,6 +91,7 @@ def load_metrics(metrics_dir: Path):
         "pick_outcomes": metrics_dir / "pick_outcomes.parquet",
         "draft_meta": metrics_dir / "draft_meta.parquet",
         "adv_snapshots": metrics_dir / "adv_snapshots.parquet",
+        "elo_patch_latest": metrics_dir / "elo_patch_latest.parquet",
     }
     for key, path in files.items():
         if path.exists():

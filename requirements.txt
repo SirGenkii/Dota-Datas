@@ -13,3 +13,4 @@ tqdm
 python-dotenv
 streamlit
 requests
+plotly

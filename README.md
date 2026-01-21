@@ -37,6 +37,15 @@
   - `03_full_scrap.ipynb`: full fetch of filtered match_ids -> chunks in `data/raw/chunks_v2/` + combined `data/raw/data_v2.json`.
 - Requires `OPENDOTA_KEY` in `.env`.
 
+### 1b) Sync incrémentale (nouveaux matchs)
+Télécharge uniquement les matchs récents manquants (pour les teams de `data/teams_to_look.csv`), sauvegarde les réponses en chunks JSON sous `data/raw/updates/`, puis append dans `data/processed/` :
+```bash
+make update OUT=data/processed
+```
+Options utiles:
+- `SINCE=YYYY-MM-DD` pour borner la recherche (ex: `make update SINCE=2025-01-01`)
+- `LIMIT`, `MAX_PAGES`, `CHUNK_SIZE`, `SLEEP_MATCH_DETAIL` (voir `Makefile`)
+
 ### 2) Process raw -> parquet
 Generate processed tables (matches, players, objectives, teamfights):
 ```bash
@@ -90,7 +99,7 @@ streamlit run app/dashboard_streamlit.py
 
 ## Notes
 - Ensure `OPENDOTA_KEY` is set in `.env` for scraping.
-- Precompute relies on both processed parquet and raw JSON for gold/xp advantages, but Streamlit dashboards now load only the parquet outputs (no raw JSON at runtime).
+- Precompute relies on processed parquet + raw JSON for gold/xp advantages and draft (picks/bans). The script now accepts multiple raw sources (files or directories of chunks) and defaults to `data/raw/data_v2.json` + `data/raw/updates/` when present.
 - Series mapping uses `series_type`: 0=BO1, 1=BO3, 2=BO5, 3=BO2.
 
 ```bash

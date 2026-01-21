@@ -17,6 +17,24 @@ SERIES_OVERRIDE_PATH = Path("data/mappings/series_overrides.csv")
 
 ADV_BUCKET_MINUTES = (5, 10, 12, 15, 20)
 ADV_BUCKETS = [-10_000, -5_000, -1_000, 0, 1_000, 5_000, 10_000, 999_999]
+TIER_WEIGHTS = {"major": 1.25, "qualifier": 1.05, "regular": 1.0}
+LOCATION_WEIGHTS = {"lan": 1.05, "online": 1.0}
+PATCH_INIT_WEIGHT = 0.75
+
+
+def _k_factor(games: int) -> float:
+    """Tiered K-factor depending on experience."""
+    if games < 30:
+        return 40.0
+    if games < 80:
+        return 25.0
+    return 15.0
+
+
+def _match_weight(tier: str | None, location: str | None) -> float:
+    tier_w = TIER_WEIGHTS.get(str(tier or "").lower(), 1.0)
+    loc_w = LOCATION_WEIGHTS.get(str(location or "").lower(), 1.0)
+    return tier_w * loc_w
 
 
 def load_lookup(path: Path) -> List[int]:
@@ -39,57 +57,161 @@ def extract_team_id(row: Dict[str, object], team_ids: List[int]) -> Tuple[int | 
     return tracked, opp, 1 if team_is_radiant else 0
 
 
-def compute_elo(matches: pl.DataFrame, team_ids: List[int], k: float = 24.0, base_elo: float = 1500.0, side_adv: float = 25.0) -> Tuple[pl.DataFrame, pl.DataFrame]:
+def compute_elo(
+    matches: pl.DataFrame,
+    team_ids: List[int],
+    base_elo: float = 1500.0,
+    side_adv: float = 20.0,
+) -> Tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
     """
-    Compute Elo for tracked teams.
-    - Only tracked teams are updated.
-    - Opponents not tracked are assumed fixed at base_elo.
-    - side_adv applies to Radiant (advantage).
+    Compute Elo for tracked teams (global + patch).
+    - Only tracked teams are emitted in history/latest, but opponents can be untracked.
+    - Weighted by tournament tier/location; side_adv applies to Radiant.
+    - Patch Elo is initialized as a blend of current global Elo and base_elo.
     """
-    ratings: Dict[int, float] = {tid: base_elo for tid in team_ids}
-    history_rows = []
+    tracked = set(team_ids)
+    state: Dict[int, Dict[str, Dict]] = {}
+    history_rows: List[Dict[str, object]] = []
 
-    # Sort matches by start_time
-    matches_sorted = matches.sort("start_time")
+    def get_team_state(tid: int) -> Dict[str, Dict]:
+        if tid not in state:
+            state[tid] = {"global": {"elo": base_elo, "games": 0}, "patches": {}}
+        return state[tid]
+
+    # Sort matches by time to avoid leakage
+    needed_cols = [
+        "match_id",
+        "start_time",
+        "radiant_team_id",
+        "dire_team_id",
+        "radiant_win",
+        "patch",
+        "tournament_tier",
+        "tournament_location",
+    ]
+    matches_sorted = matches.select([c for c in needed_cols if c in matches.columns]).sort("start_time")
+
     for row in matches_sorted.iter_rows(named=True):
-        tracked_id, opp_id, team_is_radiant = extract_team_id(row, team_ids)
-        if tracked_id is None:
+        rid = row.get("radiant_team_id")
+        did = row.get("dire_team_id")
+        if rid is None or did is None:
             continue
-        team_rating = ratings.get(tracked_id, base_elo)
-        opp_rating = ratings.get(opp_id, base_elo) if opp_id is not None and opp_id in team_ids else base_elo
-
-        # Determine score for tracked team
-        radiant_win = row.get("radiant_win")
-        if radiant_win is None:
+        # ensure ints
+        try:
+            rid = int(rid)
+            did = int(did)
+        except Exception:
             continue
-        team_win = radiant_win if team_is_radiant else (1 - int(radiant_win))
+        rad_win = row.get("radiant_win")
+        if rad_win is None:
+            continue
+        rad_win = bool(rad_win)
 
-        # Side adjustment: Radiant gets +side_adv
-        adj = side_adv if team_is_radiant else -side_adv
-        expected = 1 / (1 + 10 ** (((opp_rating - team_rating) - adj) / 400))
-        new_rating = team_rating + k * (team_win - expected)
+        tier = row.get("tournament_tier") or "regular"
+        location = row.get("tournament_location") or "online"
+        weight = _match_weight(tier, location)
+        patch_val = row.get("patch")
+        try:
+            patch_int = int(patch_val) if patch_val is not None else None
+        except Exception:
+            patch_int = None
 
-        history_rows.append(
-            {
-                "match_id": row.get("match_id"),
-                "start_time": row.get("start_time"),
-                "start_dt": datetime.fromtimestamp(row.get("start_time", 0), tz=timezone.utc),
-                "team_id": tracked_id,
-                "opponent_id": opp_id,
-                "team_is_radiant": bool(team_is_radiant),
-                "team_win": team_win,
-                "rating_pre": team_rating,
-                "rating_post": new_rating,
-                "expected": expected,
-            }
-        )
+        # Pull states
+        r_state = get_team_state(rid)
+        d_state = get_team_state(did)
 
-        ratings[tracked_id] = new_rating
+        # Global K (shared for the match)
+        k_match_global = weight * (_k_factor(r_state["global"]["games"]) + _k_factor(d_state["global"]["games"])) / 2
+
+        # Expected scores with side advantage (Radiant gets +side_adv)
+        expected_rad = 1 / (1 + 10 ** (((d_state["global"]["elo"] - r_state["global"]["elo"]) - side_adv) / 400))
+        delta_rad = k_match_global * ((1 if rad_win else 0) - expected_rad)
+
+        # Patch states
+        r_patch = d_patch = None
+        if patch_int is not None:
+            if patch_int not in r_state["patches"]:
+                r_state["patches"][patch_int] = {
+                    "elo": PATCH_INIT_WEIGHT * r_state["global"]["elo"] + (1 - PATCH_INIT_WEIGHT) * base_elo,
+                    "games": 0,
+                }
+            if patch_int not in d_state["patches"]:
+                d_state["patches"][patch_int] = {
+                    "elo": PATCH_INIT_WEIGHT * d_state["global"]["elo"] + (1 - PATCH_INIT_WEIGHT) * base_elo,
+                    "games": 0,
+                }
+            r_patch = r_state["patches"][patch_int]
+            d_patch = d_state["patches"][patch_int]
+            k_match_patch = weight * (_k_factor(r_patch["games"]) + _k_factor(d_patch["games"])) / 2
+            expected_rad_patch = 1 / (1 + 10 ** (((d_patch["elo"] - r_patch["elo"]) - side_adv) / 400))
+            delta_rad_patch = k_match_patch * ((1 if rad_win else 0) - expected_rad_patch)
+        else:
+            expected_rad_patch = None
+            delta_rad_patch = None
+
+        # Update global
+        r_state["global"]["elo"] += delta_rad
+        d_state["global"]["elo"] -= delta_rad
+        r_state["global"]["games"] += 1
+        d_state["global"]["games"] += 1
+
+        # Update patch
+        if r_patch is not None and d_patch is not None and delta_rad_patch is not None:
+            r_patch["elo"] += delta_rad_patch
+            d_patch["elo"] -= delta_rad_patch
+            r_patch["games"] += 1
+            d_patch["games"] += 1
+
+        # History rows for tracked teams
+        for team_id, opp_id, team_is_radiant, team_win in [
+            (rid, did, True, 1 if rad_win else 0),
+            (did, rid, False, 0 if rad_win else 1),
+        ]:
+            if team_id not in tracked:
+                continue
+            t_state = r_state if team_is_radiant else d_state
+            tp_state = r_patch if team_is_radiant else d_patch
+            history_rows.append(
+                {
+                    "match_id": row.get("match_id"),
+                    "start_time": row.get("start_time"),
+                    "start_dt": datetime.fromtimestamp(row.get("start_time", 0) or 0, tz=timezone.utc),
+                    "team_id": team_id,
+                    "opponent_id": opp_id,
+                    "team_is_radiant": bool(team_is_radiant),
+                    "team_win": team_win,
+                    "rating_pre": (t_state["global"]["elo"] - delta_rad) if team_is_radiant else (t_state["global"]["elo"] + delta_rad),
+                    "rating_post": t_state["global"]["elo"],
+                    "rating_pre_patch": (tp_state["elo"] - (delta_rad_patch if team_is_radiant else -delta_rad_patch))
+                    if tp_state is not None and delta_rad_patch is not None
+                    else None,
+                    "rating_post_patch": tp_state["elo"] if tp_state is not None else None,
+                    "expected": expected_rad if team_is_radiant else (1 - expected_rad),
+                    "expected_patch": expected_rad_patch if team_is_radiant else (1 - expected_rad_patch) if expected_rad_patch is not None else None,
+                    "tournament_tier": tier,
+                    "tournament_location": location,
+                    "weight": weight,
+                    "patch": patch_int,
+                }
+            )
 
     hist_df = pl.DataFrame(history_rows, strict=False)
-    latest_rows = [{"team_id": tid, "elo": elo} for tid, elo in ratings.items()]
+
+    # Latest global Elo
+    latest_rows = [{"team_id": tid, "elo": state.get(tid, {}).get("global", {}).get("elo", base_elo)} for tid in tracked]
     latest_df = pl.DataFrame(latest_rows, strict=False).sort("elo", descending=True)
-    return hist_df, latest_df
+
+    # Latest patch Elo
+    patch_rows = []
+    for tid in tracked:
+        patches = state.get(tid, {}).get("patches", {})
+        for p_val, p_state in patches.items():
+            patch_rows.append({"team_id": tid, "patch": p_val, "elo": p_state.get("elo")})
+    patch_latest = pl.DataFrame(patch_rows, strict=False)
+    if not patch_latest.is_empty():
+        patch_latest = patch_latest.sort(["patch", "elo"], descending=[False, True])
+
+    return hist_df, latest_df, patch_latest
 
 
 def compute_firsts(matches: pl.DataFrame, objectives: pl.DataFrame, players: pl.DataFrame, tracked_ids: List[int]) -> pl.DataFrame:
@@ -855,15 +977,77 @@ def apply_series_overrides(matches: pl.DataFrame, overrides_path: Path = SERIES_
     return out.drop(drop_cols)
 
 
+def _iter_chunk_files(root: Path, pattern: str = "matches_chunk*.json") -> List[Path]:
+    if not root.exists() or not root.is_dir():
+        return []
+    return sorted([p for p in root.glob(f"**/{pattern}") if p.is_file()])
+
+
+def _raw_map_from_loaded(obj: Any, match_ids: set[int]) -> Dict[int, dict]:
+    raw_map: Dict[int, dict] = {}
+    if isinstance(obj, dict):
+        obj = [obj]
+    if not isinstance(obj, list):
+        return raw_map
+
+    for item in obj:
+        if not isinstance(item, dict):
+            continue
+        match = item.get("json") if "json" in item else item
+        if not isinstance(match, dict):
+            continue
+        mid = match.get("match_id")
+        if not isinstance(mid, int):
+            continue
+        if match_ids and mid not in match_ids:
+            continue
+        raw_map[mid] = match
+    return raw_map
+
+
+def load_raw_map(raw_sources: Sequence[Path], match_ids: set[int]) -> Dict[int, dict]:
+    """
+    Load match raw payloads keyed by match_id from:
+    - combined JSON files (list of wrapped matches), and/or
+    - directories containing chunk files (matches_chunk*.json).
+    """
+    raw_map: Dict[int, dict] = {}
+    for src in raw_sources:
+        if not src.exists():
+            continue
+        if src.is_dir():
+            for fp in _iter_chunk_files(src):
+                try:
+                    with fp.open("r", encoding="utf-8") as f:
+                        loaded = json.load(f)
+                except Exception:
+                    continue
+                raw_map.update(_raw_map_from_loaded(loaded, match_ids))
+            continue
+
+        if src.is_file():
+            try:
+                with src.open("r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+            except Exception:
+                continue
+            raw_map.update(_raw_map_from_loaded(loaded, match_ids))
+    return raw_map
+
+
 def main():
     parser = argparse.ArgumentParser(description="Precompute metrics (Elo, firsts) for tracked teams.")
     parser.add_argument("--processed", default="data/processed", help="Path to processed parquet dir.")
     parser.add_argument("--teams", default="data/teams_to_look.csv", help="CSV listing tracked teams (TeamID).")
     parser.add_argument("--out", default="data/metrics", help="Output directory for metrics.")
-    parser.add_argument("--raw", default="data/raw/data_v2.json", help="Raw JSON file for gold/xp adv.")
-    parser.add_argument("--k", type=float, default=24.0, help="Elo K factor.")
+    parser.add_argument(
+        "--raw",
+        action="append",
+        default=None,
+        help="Raw source (file or directory). Repeatable. If omitted, defaults to data/raw/data_v2.json and data/raw/updates (if present).",
+    )
     parser.add_argument("--base-elo", type=float, default=1500.0, help="Base Elo for unseen teams.")
-    parser.add_argument("--side-adv", type=float, default=25.0, help="Radiant side advantage in Elo calc.")
+    parser.add_argument("--side-adv", type=float, default=20.0, help="Radiant side advantage in Elo calc.")
     args = parser.parse_args()
 
     processed_dir = Path(args.processed)
@@ -890,24 +1074,40 @@ def main():
     )
     tracked_names = tracked_names.with_columns(pl.coalesce(pl.col("csv_name"), pl.col("name")).alias("name")).select(["team_id", "name"])
 
-    raw_path = Path(args.raw)
-    if not raw_path.exists():
-        raise FileNotFoundError(f"Raw file not found: {raw_path}")
-    raw_data = json.loads(raw_path.read_text())
-    raw_map = {item["json"]["match_id"]: item["json"] for item in raw_data}
+    match_ids_needed: set[int] = set()
+    if "match_id" in matches_raw.columns:
+        match_ids_needed = set(
+            int(v)
+            for v in matches_raw.select(pl.col("match_id").cast(pl.Int64, strict=False))
+            .drop_nulls()
+            .get_column("match_id")
+            .to_list()
+            if v is not None
+        )
+
+    raw_args = args.raw if args.raw else ["data/raw/data_v2.json", "data/raw/updates"]
+    raw_sources = [Path(p) for p in raw_args if p]
+    existing_sources = [p for p in raw_sources if p.exists()]
+    if not existing_sources:
+        raise FileNotFoundError(f"No valid --raw sources found. Tried: {[str(p) for p in raw_sources]}")
+    raw_map = load_raw_map(existing_sources, match_ids=match_ids_needed)
+    if match_ids_needed and len(raw_map) < max(1, int(0.9 * len(match_ids_needed))):
+        missing = len(match_ids_needed) - len(raw_map)
+        print(f"[warn] raw_map coverage: {len(raw_map)}/{len(match_ids_needed)} (missing {missing})")
     draft_meta = compute_draft_meta(matches_raw, raw_map)
 
-    elo_hist, elo_latest = compute_elo(
-        matches_raw.select(
-            ["match_id", "start_time", "radiant_team_id", "dire_team_id", "radiant_win"]
-        ),
+    elo_hist, elo_latest, elo_patch_latest = compute_elo(
+        matches_raw,
         team_ids=team_ids,
-        k=args.k,
         base_elo=args.base_elo,
         side_adv=args.side_adv,
     )
     # Add leaderboard rank (1 = highest elo)
     elo_latest = elo_latest.with_columns(pl.col("elo").rank(method="dense", descending=True).alias("elo_rank"))
+    if elo_patch_latest is not None and not elo_patch_latest.is_empty():
+        elo_patch_latest = elo_patch_latest.with_columns(
+            pl.col("elo").rank(method="dense", descending=True).over("patch").alias("elo_rank")
+        )
     firsts = compute_firsts(matches_raw, objectives, tables["players"], tracked_ids=team_ids)
     roshan = compute_roshan_metrics(matches_raw, objectives, tracked_ids=team_ids)
     gold_buckets = compute_adv_buckets(matches_raw, raw_map=raw_map, tracked_ids=team_ids, key="radiant_gold_adv", minutes=ADV_BUCKET_MINUTES)
@@ -918,6 +1118,8 @@ def main():
 
     elo_hist.write_parquet(out_dir / "elo_timeseries.parquet")
     elo_latest.write_parquet(out_dir / "elo_latest.parquet")
+    if elo_patch_latest is not None and not elo_patch_latest.is_empty():
+        elo_patch_latest.write_parquet(out_dir / "elo_patch_latest.parquet")
     firsts.write_parquet(out_dir / "firsts.parquet")
     tracked_names.write_parquet(out_dir / "tracked_teams.parquet")
     roshan.write_parquet(out_dir / "roshan.parquet")
@@ -932,6 +1134,8 @@ def main():
     print("Metrics written:")
     print(f"- Elo history: {out_dir / 'elo_timeseries.parquet'} ({elo_hist.shape})")
     print(f"- Elo latest: {out_dir / 'elo_latest.parquet'} ({elo_latest.shape})")
+    if elo_patch_latest is not None and not elo_patch_latest.is_empty():
+        print(f"- Elo patch latest: {out_dir / 'elo_patch_latest.parquet'} ({elo_patch_latest.shape})")
     print(f"- Firsts: {out_dir / 'firsts.parquet'} ({firsts.shape})")
     print(f"- Tracked teams: {out_dir / 'tracked_teams.parquet'} ({tracked_names.shape})")
     print(f"- Roshan: {out_dir / 'roshan.parquet'} ({roshan.shape})")

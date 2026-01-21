@@ -2,7 +2,7 @@ VENV := .venv
 PYTHON := $(VENV)/bin/python
 PIP := $(VENV)/bin/pip
 
-.PHONY: venv install activate notebook deps-clean parquet
+.PHONY: venv install activate notebook deps-clean parquet update
 
 venv:
 	python3 -m venv $(VENV)
@@ -28,6 +28,17 @@ OUT ?= data/processed
 ALIASES ?= data/team_aliases.csv
 parquet: install
 	$(PYTHON) -m src.dota_data.io --raw $(RAW) --out $(OUT) --aliases $(ALIASES)
+
+# Sync incrémentale: télécharge les matchs récents manquants et append dans data/processed
+# Usage: make update [OUT=data/processed] [RAW_UPDATES=data/raw/updates] [LIMIT=100] [MAX_PAGES=3] [SINCE=YYYY-MM-DD]
+RAW_UPDATES ?= data/raw/updates
+LIMIT ?= 100
+MAX_PAGES ?= 3
+SINCE ?=
+CHUNK_SIZE ?= 100
+SLEEP_MATCH_DETAIL ?= 1.0
+update: install
+	PYTHONPATH=. $(PYTHON) -m src.dota_data.update --teams data/teams_to_look.csv --processed $(OUT) --raw-updates $(RAW_UPDATES) --aliases $(ALIASES) --limit $(LIMIT) --max-pages $(MAX_PAGES) $(if $(SINCE),--since $(SINCE),) --chunk-size $(CHUNK_SIZE) --sleep-match-detail $(SLEEP_MATCH_DETAIL) --apply-parquet
 
 # Pré-calcul des métriques (Elo, firsts) à partir des parquets
 METRICS_OUT ?= data/metrics
