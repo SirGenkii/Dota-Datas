@@ -12,6 +12,35 @@ import numpy as np
 import altair as alt
 
 
+def _as_int(v: Any) -> Optional[int]:
+    if v is None:
+        return None
+    return int(v)
+
+
+def _as_bool(v: Any) -> Optional[bool]:
+    if v is None:
+        return None
+    return bool(v)
+
+
+def _safe_pl_rows(rows: list[dict], schema: dict[str, pl.DataType]) -> pl.DataFrame:
+    cols: dict[str, list[Any]] = {k: [] for k in schema}
+    for r in rows:
+        for k, dtype in schema.items():
+            val = r.get(k)
+            if val is None:
+                cols[k].append(None)
+                continue
+            if dtype == pl.Int64:
+                cols[k].append(int(val))
+            elif dtype == pl.Boolean:
+                cols[k].append(bool(val))
+            else:
+                cols[k].append(val)
+    return pl.DataFrame(cols, schema=schema, strict=False)
+
+
 def _find_root() -> Path:
     cand = Path.cwd()
     for c in [cand, *cand.parents]:
@@ -417,7 +446,9 @@ def compute_rank_window_metrics(
         fr_side = first_rosh_map.get(mid)
         steals_rad, steals_dire = steals_map.get(mid, (None, None))
 
-        win = radiant_win if team_is_radiant else (1 - int(radiant_win))
+        # Keep a consistent dtype (int) for Polars when building rows.
+        rad_win = int(radiant_win)
+        win = rad_win if team_is_radiant else (1 - rad_win)
         fb_hit = fb_is_rad == team_is_radiant if fb_is_rad is not None else None
         ft_hit = (ft_building_is_rad is not None and ft_building_is_rad != team_is_radiant)
         ft_hit = ft_hit if ft_building_is_rad is not None else None
@@ -438,27 +469,45 @@ def compute_rank_window_metrics(
 
         rows.append(
             {
-                "team_id": team_id,
-                "team_is_radiant": team_is_radiant,
-                "is_first_pick": first_pick_team == team_id if first_pick_team is not None else None,
-                "is_last_pick": last_pick_team == team_id if last_pick_team is not None else None,
-                "win": win,
-                "first_blood": fb_hit,
-                "first_tower": ft_hit,
-                "first_roshan": fr_hit,
-                "combo_for": combo_for,
-                "combo_against": combo_against,
-                "aegis_steal_for": steal_for,
-                "aegis_steal_against": steal_against,
-                "match_id": mid,
-                "opp_id": r.get("opp_id"),
+                "team_id": _as_int(team_id),
+                "team_is_radiant": _as_bool(team_is_radiant),
+                "is_first_pick": _as_bool(first_pick_team == team_id) if first_pick_team is not None else None,
+                "is_last_pick": _as_bool(last_pick_team == team_id) if last_pick_team is not None else None,
+                "win": _as_int(win),
+                "first_blood": _as_bool(fb_hit),
+                "first_tower": _as_bool(ft_hit),
+                "first_roshan": _as_bool(fr_hit),
+                "combo_for": _as_bool(combo_for),
+                "combo_against": _as_bool(combo_against),
+                "aegis_steal_for": _as_bool(steal_for),
+                "aegis_steal_against": _as_bool(steal_against),
+                "match_id": _as_int(mid),
+                "opp_id": _as_int(r.get("opp_id")),
             }
         )
 
     if not rows:
         return None
 
-    df = pl.DataFrame(rows, strict=False)
+    df = _safe_pl_rows(
+        rows,
+        schema={
+            "team_id": pl.Int64,
+            "team_is_radiant": pl.Boolean,
+            "is_first_pick": pl.Boolean,
+            "is_last_pick": pl.Boolean,
+            "win": pl.Int64,
+            "first_blood": pl.Boolean,
+            "first_tower": pl.Boolean,
+            "first_roshan": pl.Boolean,
+            "combo_for": pl.Boolean,
+            "combo_against": pl.Boolean,
+            "aegis_steal_for": pl.Boolean,
+            "aegis_steal_against": pl.Boolean,
+            "match_id": pl.Int64,
+            "opp_id": pl.Int64,
+        },
+    )
     labels = [
         ("overall", None),
         ("radiant_first_pick", (pl.col("team_is_radiant") & pl.col("is_first_pick"))),
@@ -622,7 +671,9 @@ def compute_rank_range_metrics(
         fr_side = first_rosh_map.get(mid)
         steals_rad, steals_dire = steals_map.get(mid, (None, None))
 
-        win = radiant_win if team_is_radiant else (1 - int(radiant_win))
+        # Keep a consistent dtype (int) for Polars when building rows.
+        rad_win = int(radiant_win)
+        win = rad_win if team_is_radiant else (1 - rad_win)
         fb_hit = fb_is_rad == team_is_radiant if fb_is_rad is not None else None
         ft_hit = (ft_building_is_rad is not None and ft_building_is_rad != team_is_radiant)
         ft_hit = ft_hit if ft_building_is_rad is not None else None
@@ -644,27 +695,46 @@ def compute_rank_range_metrics(
         rows.append(
             {
                 "label": None,  # fill later
-                "team_id": team_id,
-                "team_is_radiant": team_is_radiant,
-                "is_first_pick": first_pick_team == team_id if first_pick_team is not None else None,
-                "is_last_pick": last_pick_team == team_id if last_pick_team is not None else None,
-                "win": win,
-                "first_blood": fb_hit,
-                "first_tower": ft_hit,
-                "first_roshan": fr_hit,
-                "combo_for": combo_for,
-                "combo_against": combo_against,
-                "aegis_steal_for": steal_for,
-                "aegis_steal_against": steal_against,
-                "match_id": mid,
-                "opp_id": r.get("opp_id"),
+                "team_id": _as_int(team_id),
+                "team_is_radiant": _as_bool(team_is_radiant),
+                "is_first_pick": _as_bool(first_pick_team == team_id) if first_pick_team is not None else None,
+                "is_last_pick": _as_bool(last_pick_team == team_id) if last_pick_team is not None else None,
+                "win": _as_int(win),
+                "first_blood": _as_bool(fb_hit),
+                "first_tower": _as_bool(ft_hit),
+                "first_roshan": _as_bool(fr_hit),
+                "combo_for": _as_bool(combo_for),
+                "combo_against": _as_bool(combo_against),
+                "aegis_steal_for": _as_bool(steal_for),
+                "aegis_steal_against": _as_bool(steal_against),
+                "match_id": _as_int(mid),
+                "opp_id": _as_int(r.get("opp_id")),
             }
         )
 
     if not rows:
         return None
 
-    df = pl.DataFrame(rows, strict=False)
+    df = _safe_pl_rows(
+        rows,
+        schema={
+            "label": pl.Utf8,
+            "team_id": pl.Int64,
+            "team_is_radiant": pl.Boolean,
+            "is_first_pick": pl.Boolean,
+            "is_last_pick": pl.Boolean,
+            "win": pl.Int64,
+            "first_blood": pl.Boolean,
+            "first_tower": pl.Boolean,
+            "first_roshan": pl.Boolean,
+            "combo_for": pl.Boolean,
+            "combo_against": pl.Boolean,
+            "aegis_steal_for": pl.Boolean,
+            "aegis_steal_against": pl.Boolean,
+            "match_id": pl.Int64,
+            "opp_id": pl.Int64,
+        },
+    )
     labels = [
         ("overall", None),
         ("radiant_first_pick", (pl.col("team_is_radiant") & pl.col("is_first_pick"))),
@@ -1075,7 +1145,9 @@ def compute_h2h_metrics(
         steals_rad, steals_dire = steals_map.get(mid, (None, None))
 
         for team_id, team_is_radiant in ((rad_id, True), (dire_id, False)):
-            win = radiant_win if team_is_radiant else (1 - int(radiant_win))
+            # Keep a consistent dtype (int) for Polars when building rows.
+            rad_win = int(radiant_win)
+            win = rad_win if team_is_radiant else (1 - rad_win)
             fb_hit = fb_is_rad == team_is_radiant if fb_is_rad is not None else None
             ft_hit = (ft_building_is_rad is not None and ft_building_is_rad != team_is_radiant)
             ft_hit = ft_hit if ft_building_is_rad is not None else None
@@ -1096,24 +1168,42 @@ def compute_h2h_metrics(
 
             rows.append(
                 {
-                    "team_id": team_id,
-                    "team_is_radiant": team_is_radiant,
-                    "is_first_pick": first_pick_team == team_id if first_pick_team is not None else None,
-                    "is_last_pick": last_pick_team == team_id if last_pick_team is not None else None,
-                    "win": win,
-                    "first_blood": fb_hit,
-                    "first_tower": ft_hit,
-                    "first_roshan": fr_hit,
-                    "combo_for": combo_for,
-                    "combo_against": combo_against,
-                    "aegis_steal_for": steal_for,
-                    "aegis_steal_against": steal_against,
-                    "match_id": mid,
-                    "start_time": r.get("start_time"),
+                    "team_id": _as_int(team_id),
+                    "team_is_radiant": _as_bool(team_is_radiant),
+                    "is_first_pick": _as_bool(first_pick_team == team_id) if first_pick_team is not None else None,
+                    "is_last_pick": _as_bool(last_pick_team == team_id) if last_pick_team is not None else None,
+                    "win": _as_int(win),
+                    "first_blood": _as_bool(fb_hit),
+                    "first_tower": _as_bool(ft_hit),
+                    "first_roshan": _as_bool(fr_hit),
+                    "combo_for": _as_bool(combo_for),
+                    "combo_against": _as_bool(combo_against),
+                    "aegis_steal_for": _as_bool(steal_for),
+                    "aegis_steal_against": _as_bool(steal_against),
+                    "match_id": _as_int(mid),
+                    "start_time": _as_int(r.get("start_time")),
                 }
             )
 
-    df = pl.DataFrame(rows, strict=False)
+    df = _safe_pl_rows(
+        rows,
+        schema={
+            "team_id": pl.Int64,
+            "team_is_radiant": pl.Boolean,
+            "is_first_pick": pl.Boolean,
+            "is_last_pick": pl.Boolean,
+            "win": pl.Int64,
+            "first_blood": pl.Boolean,
+            "first_tower": pl.Boolean,
+            "first_roshan": pl.Boolean,
+            "combo_for": pl.Boolean,
+            "combo_against": pl.Boolean,
+            "aegis_steal_for": pl.Boolean,
+            "aegis_steal_against": pl.Boolean,
+            "match_id": pl.Int64,
+            "start_time": pl.Int64,
+        },
+    )
     labels = [
         ("overall", None),
         ("radiant_first_pick", (pl.col("team_is_radiant") & pl.col("is_first_pick"))),
