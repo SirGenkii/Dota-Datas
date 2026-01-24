@@ -1426,7 +1426,7 @@ def team_block(
             st.markdown(
                 f"""
                 <div style="display:flex; align-items:center; gap:10px;">
-                <img src="{safe_uri}" style="max-width:128px; object-fit:contain;" />
+                <img src="{safe_uri}" style="max-height:128px; object-fit:contain;" />
                 <h3 style="margin:0;">{safe_label}</h3>
                 </div>
                 """,
@@ -1438,7 +1438,7 @@ def team_block(
             with col_title:
                 st.subheader(label)
             with col_logo:
-                st.image(logo_url, width=128)
+                st.image(logo_url, height=128)
         if current_rating is not None:
             rank_txt = f"Rank #{int(current_rank)}" if current_rank is not None else ""
             rd_txt = f" ±{float(current_rd):.1f}" if current_rd is not None else ""
@@ -2202,11 +2202,13 @@ def main():
         def sidebar_rank_slider(team_id: Optional[int], title: str, label: str) -> None:
             if team_id is None:
                 return
+
             team_rank = None
             try:
                 team_rank = float(ranking_for_ranges.filter(pl.col("team_id") == team_id)[rank_col][0])
             except Exception:
                 team_rank = None
+
             default_low = max(1, int(team_rank - 5)) if team_rank is not None else 1
             default_high = min(max_rank, int(team_rank + 5)) if team_rank is not None else min(50, max_rank)
             default_range = (default_low, default_high)
@@ -2214,7 +2216,14 @@ def main():
 
             st.sidebar.markdown(f"**{label}**")
             slider_label = f"Rank range ({label})"
-        
+
+            st.sidebar.button(
+                "All ranks",
+                key=f"all_ranks_sidebar_{team_id}_{title}",
+                on_click=_set_state,
+                args=(key, (1, max_rank)),
+            )
+
             if key in st.session_state:
                 st.sidebar.slider(
                     slider_label,
@@ -2233,12 +2242,45 @@ def main():
                     key=key,
                 )
 
-            st.sidebar.button(
-                    "All ranks",
-                    key=f"all_ranks_sidebar_{team_id}_{title}",
-                    on_click=_set_state,
-                    args=(key, (1, max_rank)),
+            # Visual marker for the team's own rank (Streamlit slider doesn't support marker overlays).
+            rank_int = int(round(team_rank)) if team_rank is not None else None
+            try:
+                low, high = st.session_state.get(key, default_range)
+                low = int(low)
+                high = int(high)
+            except Exception:  # noqa: BLE001
+                low, high = default_range
+            low = max(1, min(low, max_rank))
+            high = max(1, min(high, max_rank))
+            if low > high:
+                low, high = high, low
+
+            if rank_int is not None:
+                denom = max(1, (max_rank - 1))
+                low_pct = 100.0 * (low - 1) / denom
+                high_pct = 100.0 * (high - 1) / denom
+                rank_pct = 100.0 * (rank_int - 1) / denom
+                in_range = low <= rank_int <= high
+                marker_color = "#2563eb" if in_range else "#94a3b8"
+                st.sidebar.markdown(
+                    f"""
+                    <div style="margin-top:-6px; margin-bottom:8px;">
+                      <div style="position:relative; height:10px; background:#e5e7eb; border-radius:999px;">
+                        <div style="position:absolute; left:{low_pct:.3f}%; width:{max(0.0, high_pct-low_pct):.3f}%; top:0; bottom:0; background:#ef4444; border-radius:999px;"></div>
+                        <div title="Team rank #{rank_int}"
+                             style="position:absolute; left:{rank_pct:.3f}%; top:-6px; bottom:-6px; width:2px; background:{marker_color}; border-radius:2px;"></div>
+                      </div>
+                      <div style="display:flex; justify-content:space-between; font-size:12px; color:#6b7280; margin-top:4px;">
+                        <span>1</span>
+                        <span>Team rank: <b style="color:{marker_color};">#{rank_int}</b></span>
+                        <span>{max_rank}</span>
+                      </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
                 )
+            else:
+                st.sidebar.caption("Team rank: unavailable")
 
         sidebar_rank_slider(team_a_id, team_a, f"{team_a} (A)")
         if team_b_id is not None:
