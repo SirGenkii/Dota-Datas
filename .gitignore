@@ -134,6 +134,17 @@ ENV/
 env.bak/
 venv.bak/
 
+# Local secrets (never commit keys)
+secrets/
+.ssh/
+*.pem
+*.ppk
+*.key
+
+# Temporary sync staging
+.sync_tmp/
+.sync_test/
+
 # Spyder project settings
 .spyderproject
 .spyproject

@@ -106,7 +106,7 @@ Generates:
 - `adv_snapshots.parquet` (gold/xp advantage snapshot per tracked team & minute)
 
 ## Sharing data artifacts (VPS sync)
-If you don’t want to use Git LFS for large parquet files, you can share `data/processed/` + `data/metrics/` via `rsync` over SSH to a VPS.
+If you don’t want to use Git LFS for large parquet files, you can share data via `rsync` over SSH to a VPS. The sync is snapshot-based: each upload creates a new dated snapshot directory on the server, and download pulls the latest snapshot (with a confirmation prompt before overwriting local files).
 
 ### Prerequisites
 - SSH access to your VPS (recommended: SSH key auth)
@@ -124,24 +124,65 @@ If you don’t want to use Git LFS for large parquet files, you can share `data/
    ```bash
    DOTA_DATA_REMOTE=user@your-vps:/srv/dota-datas
    ```
+   If your VPS layout is like `/home/dota_uploaduser/dota-data`, you can either:
+   - set `DOTA_DATA_REMOTE=dota_uploaduser@your-vps:/home/dota_uploaduser` and run `make ... SYNC_SUBDIR=dota-data`
+   - or set `DOTA_DATA_REMOTE=dota_uploaduser@your-vps:/home/dota_uploaduser/dota-data` and run `make ... SYNC_SUBDIR=.`
+
+### Authentication (no prompts)
+Recommended: SSH keys (no password prompts, easiest for collaboration).
+1) On each machine (you and your coworker), generate a key:
+   ```bash
+   ssh-keygen -t ed25519 -C "dota-datas"
+   ```
+2) Add the public key to the VPS user (run once per person):
+   ```bash
+   ssh-copy-id user@your-vps
+   # or manually append ~/.ssh/id_ed25519.pub into ~/.ssh/authorized_keys on the server
+   ```
+Notes:
+- Don’t share private keys between people; add multiple public keys on the server instead.
+- First connection may ask to trust the host key: run `ssh user@your-vps` once to accept it.
+
+#### Project-local key file (optional)
+If you want the sync to always use a specific key stored next to the project (but still not committed), put it under `secrets/` and point the script to it via `.env`:
+```bash
+DOTA_DATA_SSH_IDENTITY=secrets/id_ed25519
+DOTA_DATA_SSH_KNOWN_HOSTS=secrets/known_hosts
+DOTA_DATA_SSH_STRICT_HOST_KEY_CHECKING=accept-new
+```
+This makes the sync fully non-interactive (no password prompt, no host-key prompt).
+
+Windows note: easiest is to run the Make commands from WSL; then paths like `secrets/id_ed25519` work normally. If you run from native Windows OpenSSH, you can also use an absolute Windows path, but `rsync` is usually missing unless you use WSL/Git Bash.
+
+Alternative (not recommended): store a password and use `sshpass` (fully non-interactive).
+1) Install `sshpass` locally: `sudo apt install sshpass` (WSL/Linux).
+2) Add to `.env`:
+   ```bash
+   DOTA_DATA_SSH_PASSWORD=your_password_here
+   ```
 
 ### Upload / download
 - Upload local artifacts to the VPS:
   ```bash
-  make sync-upload OUT=data/processed METRICS_OUT=data/metrics SYNC_SUBDIR=dota-datas
+  make sync-upload OUT=data/processed METRICS_OUT=data/metrics
   ```
-- Download artifacts from the VPS to your local machine:
+- Download the latest snapshot from the VPS (asks confirmation before overwrite):
   ```bash
-  make sync-download OUT=data/processed METRICS_OUT=data/metrics SYNC_SUBDIR=dota-datas
+  make sync-download OUT=data/processed METRICS_OUT=data/metrics
   ```
 - Chain precompute + upload:
   ```bash
-  make precompute-upload OUT=data/processed METRICS_OUT=data/metrics SYNC_SUBDIR=dota-datas
+  make precompute-upload OUT=data/processed METRICS_OUT=data/metrics
   ```
 
 Notes:
-- Remote layout becomes: `<DOTA_DATA_REMOTE>/<SYNC_SUBDIR>/{processed,metrics}/...`
-- Use `SYNC_DELETE=1` if you want mirror semantics (delete files not present on the source side).
+- If you use password-based SSH without `sshpass`, you’ll be prompted in the terminal (the script reuses connections so it’s usually once per run).
+- Remote layout becomes: `<DOTA_DATA_REMOTE>/<SYNC_SUBDIR>/snapshot_YYYYMMDD_HHMMSS/...` (default `SYNC_SUBDIR=.` so snapshots land directly under `DOTA_DATA_REMOTE`)
+- `make sync-download` prompts by default; use `SYNC_YES=1` to skip the prompt.
+- Use `SYNC_DELETE=1` to enable `rsync --delete` for directory items.
+- Items included in snapshots are configurable via a JSON config file:
+  - Create `secrets/sync_items.json` (you can start from `sync_items.example.json`)
+  - Set `DOTA_DATA_SYNC_CONFIG=secrets/sync_items.json`
 - If `players.parquet` is too large, consider uploading a pruned dataset (e.g. `OUT=data/processed_pruned`) and keeping the full dataset only on the VPS.
 
 ### 4) Analysis notebooks

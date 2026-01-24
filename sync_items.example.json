@@ -1,0 +1,6 @@
+{
+  "processed": "data/processed",
+  "metrics": "data/metrics",
+  "teams_to_look.csv": "data/teams_to_look.csv",
+  "team_aliases.csv": "data/team_aliases.csv"
+}

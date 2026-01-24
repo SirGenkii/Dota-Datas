@@ -77,13 +77,14 @@ precompute: install
 #   make sync-upload OUT=data/processed METRICS_OUT=data/metrics SYNC_SUBDIR=dota-datas
 #   make sync-download OUT=data/processed METRICS_OUT=data/metrics SYNC_SUBDIR=dota-datas
 SYNC_REMOTE ?=
-SYNC_SUBDIR ?= dota-datas
+SYNC_SUBDIR ?= .
 SYNC_DELETE ?= 0
+SYNC_YES ?= 0
 sync-upload: install
 	PYTHONPATH=. $(PYTHON) scripts/sync_artifacts.py upload $(if $(SYNC_REMOTE),--remote $(SYNC_REMOTE),) --processed $(OUT) --metrics $(METRICS_OUT) --remote-subdir $(SYNC_SUBDIR) $(if $(filter 1 true yes,$(SYNC_DELETE)),--delete,)
 
 sync-download: install
-	PYTHONPATH=. $(PYTHON) scripts/sync_artifacts.py download $(if $(SYNC_REMOTE),--remote $(SYNC_REMOTE),) --processed $(OUT) --metrics $(METRICS_OUT) --remote-subdir $(SYNC_SUBDIR) $(if $(filter 1 true yes,$(SYNC_DELETE)),--delete,)
+	PYTHONPATH=. $(PYTHON) scripts/sync_artifacts.py download $(if $(SYNC_REMOTE),--remote $(SYNC_REMOTE),) --processed $(OUT) --metrics $(METRICS_OUT) --remote-subdir $(SYNC_SUBDIR) $(if $(filter 1 true yes,$(SYNC_DELETE)),--delete,) $(if $(filter 1 true yes,$(SYNC_YES)),--yes,)
 
 precompute-upload: precompute sync-upload
 
