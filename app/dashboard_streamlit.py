@@ -111,6 +111,8 @@ def load_metrics(metrics_dir: Path):
         "elo_hist": metrics_dir / "elo_timeseries.parquet",
         "elo_latest": metrics_dir / "elo_latest.parquet",
         "elo_latest_all": metrics_dir / "elo_latest_all.parquet",
+        "glicko2_latest": metrics_dir / "glicko2_latest.parquet",
+        "glicko2_latest_all": metrics_dir / "glicko2_latest_all.parquet",
         "firsts": metrics_dir / "firsts.parquet",
         "roshan": metrics_dir / "roshan.parquet",
         "gold_buckets": metrics_dir / "gold_buckets.parquet",
@@ -127,6 +129,46 @@ def load_metrics(metrics_dir: Path):
         if path.exists():
             metrics[key] = pl.read_parquet(path)
     return metrics
+
+
+def _rank_column(ranking_df: Optional[pl.DataFrame]) -> Optional[str]:
+    if ranking_df is None or ranking_df.is_empty():
+        return None
+    cols = set(ranking_df.columns)
+    for c in ("score_rank", "elo_rank", "rank"):
+        if c in cols:
+            return c
+    return None
+
+
+def _rank_map(ranking_df: Optional[pl.DataFrame]) -> Tuple[Optional[str], Dict[int, float]]:
+    col = _rank_column(ranking_df)
+    if col is None or ranking_df is None or ranking_df.is_empty() or "team_id" not in ranking_df.columns:
+        return None, {}
+    out: Dict[int, float] = {}
+    for r in ranking_df.iter_rows(named=True):
+        tid = r.get("team_id")
+        rk = r.get(col)
+        if tid is None or rk is None:
+            continue
+        try:
+            out[int(tid)] = float(rk)
+        except Exception:  # noqa: BLE001
+            continue
+    return col, out
+
+
+def _first_non_empty(*dfs: Optional[pl.DataFrame]) -> Optional[pl.DataFrame]:
+    for df in dfs:
+        if df is None:
+            continue
+        try:
+            if df.is_empty():
+                continue
+        except Exception:  # noqa: BLE001
+            continue
+        return df
+    return None
 
 
 def load_team_options(teams_dict: pl.DataFrame, tracked_names: Optional[pl.DataFrame], teams_csv: Path) -> pl.DataFrame:
@@ -230,7 +272,9 @@ def durations_for_team_in_rank_range(
     """Durations (minutes) for matches of team_id vs opponents whose rank is in [rank_min, rank_max]."""
     if matches is None or matches.is_empty() or "duration" not in matches.columns or elo_latest is None or elo_latest.is_empty():
         return None
-    rank_map = {int(r["team_id"]): r.get("elo_rank") for r in elo_latest.iter_rows(named=True) if r.get("team_id") is not None}
+    rank_col, rank_map = _rank_map(elo_latest)
+    if rank_col is None or not rank_map:
+        return None
     durations = []
     for r in matches.iter_rows(named=True):
         tid_rad = r.get("radiant_team_id")
@@ -274,7 +318,9 @@ def durations_for_teams_in_rank_range(
     team_set = {int(t) for t in team_ids if t is not None}
     if not team_set or matches is None or matches.is_empty() or "duration" not in matches.columns or elo_latest is None or elo_latest.is_empty():
         return None
-    rank_map = {int(r["team_id"]): r.get("elo_rank") for r in elo_latest.iter_rows(named=True) if r.get("team_id") is not None}
+    rank_col, rank_map = _rank_map(elo_latest)
+    if rank_col is None or not rank_map:
+        return None
     durations: list[float] = []
     for r in matches.iter_rows(named=True):
         tid_rad = r.get("radiant_team_id")
@@ -334,7 +380,9 @@ def compute_rank_window_metrics(
         return None
     if matches is None or matches.is_empty():
         return None
-    rank_map = {int(r["team_id"]): r.get("elo_rank") for r in elo_latest.iter_rows(named=True) if r.get("team_id") is not None}
+    rank_col, rank_map = _rank_map(elo_latest)
+    if rank_col is None or not rank_map:
+        return None
     draft_lookup = {}
     if draft_meta is not None and not draft_meta.is_empty():
         draft_lookup = {int(r["match_id"]): (r.get("first_pick_team_id"), r.get("last_pick_team_id")) for r in draft_meta.iter_rows(named=True)}
@@ -558,7 +606,9 @@ def compute_rank_range_metrics(
         return None
     if matches is None or matches.is_empty():
         return None
-    rank_map = {int(r["team_id"]): r.get("elo_rank") for r in elo_latest.iter_rows(named=True) if r.get("team_id") is not None}
+    rank_col, rank_map = _rank_map(elo_latest)
+    if rank_col is None or not rank_map:
+        return None
     draft_lookup = {}
     if draft_meta is not None and not draft_meta.is_empty():
         draft_lookup = {int(r["match_id"]): (r.get("first_pick_team_id"), r.get("last_pick_team_id")) for r in draft_meta.iter_rows(named=True)}
@@ -834,7 +884,9 @@ def series_winner_map_share(
     needed_cols = {"series_id", "leagueid", bo_col, "radiant_team_id", "dire_team_id", "radiant_win", "start_time"}
     if not needed_cols.issubset(matches.columns):
         return []
-    rank_map = {int(r["team_id"]): r.get("elo_rank") for r in elo_latest.iter_rows(named=True) if r.get("team_id") is not None}
+    rank_col, rank_map = _rank_map(elo_latest)
+    if rank_col is None or not rank_map:
+        return []
     max_maps_for_bo = {1: 1, 2: 2, 3: 3, 5: 5}
     max_maps = max_maps_for_bo.get(bo_type)
     required_wins = {1: 1, 2: 1, 3: 2, 5: 3}
@@ -916,7 +968,9 @@ def series_score_distribution(
     needed_cols = {"series_id", "leagueid", bo_col, "radiant_team_id", "dire_team_id", "radiant_win", "start_time"}
     if not needed_cols.issubset(matches.columns):
         return []
-    rank_map = {int(r["team_id"]): r.get("elo_rank") for r in elo_latest.iter_rows(named=True) if r.get("team_id") is not None}
+    rank_col, rank_map = _rank_map(elo_latest)
+    if rank_col is None or not rank_map:
+        return []
     max_maps_for_bo = {1: 1, 2: 2, 3: 3, 5: 5}
     max_maps = max_maps_for_bo.get(bo_type)
     required_wins = {1: 1, 2: 1, 3: 2, 5: 3}
@@ -1282,31 +1336,47 @@ def team_block(
 ):
     suffix = f" ({matches_count} games)" if matches_count is not None else ""
     label = f"{team_name}{suffix}" if team_name else f"{title}{suffix}"
-    # Current Elo / rank
-    current_elo = None
+    # Current rating / rank (Glicko-2 preferred; falls back to Elo).
+    current_rating = None
+    current_rd = None
     current_rank = None
-    if elo_latest is not None and team_id is not None and "elo_rank" in elo_latest.columns and "elo" in elo_latest.columns:
+    rating_label = None
+    rank_col = _rank_column(elo_latest)
+    if elo_latest is not None and team_id is not None and rank_col is not None and "team_id" in elo_latest.columns:
         cur = elo_latest.filter(pl.col("team_id") == team_id)
-        if not cur.is_empty():
-            current_elo = cur["elo"][0]
-            current_rank = cur["elo_rank"][0]
+        if not cur.is_empty() and rank_col in cur.columns:
+            current_rank = cur[rank_col][0]
+            if "rating" in cur.columns:
+                current_rating = cur["rating"][0]
+                current_rd = cur["rd"][0] if "rd" in cur.columns else None
+                rating_label = "Glicko-2"
+            elif "elo" in cur.columns:
+                current_rating = cur["elo"][0]
+                rating_label = "Elo"
     if logo_url:
         col_logo, col_label = st.columns([1, 5])
         with col_logo:
             st.image(logo_url)
         with col_label:
             st.subheader(label)
-            if current_elo is not None:
+            if current_rating is not None:
                 rank_txt = f" (rank #{int(current_rank)})" if current_rank is not None else ""
-
-                st.markdown(f"<h3 style='margin-top:-10px;'>Elo: {current_elo:.1f}{rank_txt}</h3>", unsafe_allow_html=True)
+                rd_txt = f" ±{float(current_rd):.1f}" if current_rd is not None else ""
+                st.markdown(
+                    f"<h3 style='margin-top:-10px;'>{rating_label}: {float(current_rating):.1f}{rd_txt}{rank_txt}</h3>",
+                    unsafe_allow_html=True,
+                )
 
 
     else:
         st.subheader(label)
-        if current_elo is not None:
+        if current_rating is not None:
             rank_txt = f" (rank #{int(current_rank)})" if current_rank is not None else ""
-            st.markdown(f"<h3 style='margin-top:-10px;'>Elo: {current_elo:.1f}{rank_txt}</h3>", unsafe_allow_html=True)
+            rd_txt = f" ±{float(current_rd):.1f}" if current_rd is not None else ""
+            st.markdown(
+                f"<h3 style='margin-top:-10px;'>{rating_label}: {float(current_rating):.1f}{rd_txt}{rank_txt}</h3>",
+                unsafe_allow_html=True,
+            )
 
     if team_id is None:
         st.info("Select a team.")
@@ -1314,14 +1384,15 @@ def team_block(
 
     # Rank-range comparison (replaces pick/side outcomes)
     st.subheader("Performance vs rank range")
-    if elo_latest is None or elo_latest.is_empty() or "elo_rank" not in elo_latest.columns or players is None or players.is_empty():
-        st.info("No Elo rank data (run make precompute).")
+    rank_col = _rank_column(elo_latest)
+    if elo_latest is None or elo_latest.is_empty() or rank_col is None or players is None or players.is_empty():
+        st.info("No ranking data (run make precompute).")
     else:
-        max_rank = int(elo_latest["elo_rank"].max())
+        max_rank = int(elo_latest[rank_col].max())
         team_rank = None
         if team_id is not None:
             try:
-                team_rank = float(elo_latest.filter(pl.col("team_id") == team_id)["elo_rank"][0])
+                team_rank = float(elo_latest.filter(pl.col("team_id") == team_id)[rank_col][0])
             except Exception:
                 team_rank = None
         default_low = max(1, int(team_rank - 5)) if team_rank is not None else 1
@@ -1552,9 +1623,10 @@ def team_block(
 
         # Duration view for all games of teams in the rank window
         teams_in_range: list[int] = []
-        if elo_latest is not None and not elo_latest.is_empty() and "elo_rank" in elo_latest.columns and "team_id" in elo_latest.columns:
+        rank_col = _rank_column(elo_latest)
+        if elo_latest is not None and not elo_latest.is_empty() and rank_col is not None and "team_id" in elo_latest.columns:
             teams_in_range = (
-                elo_latest.filter(pl.col("elo_rank").is_between(rank_range_duration[0], rank_range_duration[1]))
+                elo_latest.filter(pl.col(rank_col).is_between(rank_range_duration[0], rank_range_duration[1]))
                 .select(pl.col("team_id").cast(pl.Int64, strict=False))
                 .drop_nulls()
                 .get_column("team_id")
@@ -1992,8 +2064,12 @@ def main():
             else None
         )
 
+    ranking_for_ranges = _first_non_empty(
+        metrics.get("glicko2_latest_all"),
+        metrics.get("elo_latest_all"),
+        metrics.get("elo_latest"),
+    )
     if team_b_id is None:
-        elo_for_ranks = metrics.get("elo_latest_all") or metrics.get("elo_latest")
         team_block(
             f"{team_a}",
             team_a_id,
@@ -2005,11 +2081,10 @@ def main():
             objectives=objectives,
             players=tables["players"],
             adv_snapshots=metrics.get("adv_snapshots"),
-            elo_latest=elo_for_ranks,
+            elo_latest=ranking_for_ranges,
             id_to_name=id_to_name,
         )
     else:
-        elo_for_ranks = metrics.get("elo_latest_all") or metrics.get("elo_latest")
         st.markdown(
             """
             <style>
@@ -2041,7 +2116,7 @@ def main():
                 objectives=objectives,
                 players=tables["players"],
                 adv_snapshots=metrics.get("adv_snapshots"),
-                elo_latest=elo_for_ranks,
+                elo_latest=ranking_for_ranges,
                 id_to_name=id_to_name,
                 opponent_team_id=team_b_id,
             )
@@ -2064,7 +2139,7 @@ def main():
                 objectives=objectives,
                 players=tables["players"],
                 adv_snapshots=metrics.get("adv_snapshots"),
-                elo_latest=elo_for_ranks,
+                elo_latest=ranking_for_ranges,
                 id_to_name=id_to_name,
                 opponent_team_id=team_a_id,
             )
@@ -2132,10 +2207,12 @@ def main():
                 render_h2h_table(h2h["team_b"], team_b)
 
             # Similar-level outcomes (rank window)
-            elo_latest = metrics.get("elo_latest_all") or metrics.get("elo_latest")
-            rank_map = {}
-            if elo_latest is not None and "elo_rank" in elo_latest.columns:
-                rank_map = {int(r["team_id"]): r.get("elo_rank") for r in elo_latest.iter_rows(named=True) if r.get("team_id") is not None}
+            elo_latest = _first_non_empty(
+                metrics.get("glicko2_latest_all"),
+                metrics.get("elo_latest_all"),
+                metrics.get("elo_latest"),
+            )
+            _, rank_map = _rank_map(elo_latest)
             rank_a = rank_map.get(team_a_id) if team_a_id is not None else None
             rank_b = rank_map.get(team_b_id) if team_b_id is not None else None
 
