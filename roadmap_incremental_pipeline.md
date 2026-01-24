@@ -43,6 +43,10 @@ Cela évite d’avoir à append un `data_v2.json` géant, tout en couvrant les n
 ### Mise à jour incrémentale (raw + processed)
 - Commande Make:
   - `make update OUT=data/processed`
+- Options utiles:
+  - `MAX_NEW=200` (cap sur les matchs téléchargés, plus récents d’abord)
+  - `DRY_RUN=1` (ne télécharge pas, écrit seulement `run_metadata.json`)
+  - `make healthcheck OUT=data/processed` (sanity check + traces match/série du dernier run)
 - Ce que ça fait:
   1) compare les `match_id` existants (via `data/processed/matches.parquet`)
   2) interroge `/teams/{id}/matches` pour trouver les matchs récents non présents
@@ -67,15 +71,18 @@ Cela évite d’avoir à append un `data_v2.json` géant, tout en couvrant les n
 - [x] Precompute support `--raw` multi-sources (fichier + répertoires)
 
 ### Phase B — fiabilisation & DX
-- [ ] Ajouter un `--max-new` (cap) et un `--dry-run` côté Make (optionnel)
-- [ ] Écrire une petite “healthcheck” (ex: % de raw_map couverte, nb de matchs sans adv arrays)
-- [ ] Logging plus clair + résumé final (nb nouveaux matchs / nb erreurs / temps)
+- [x] Ajouter un `--max-new` (cap) et un `--dry-run` côté Make (optionnel)
+- [x] Écrire une petite “healthcheck” (ex: % de raw_map couverte, nb de matchs sans adv arrays)
+- [x] Logging plus clair + résumé final (nb nouveaux matchs / nb erreurs / temps)
 
 ### Phase C — sortir complètement du “gros raw”
 Option 1 (recommended):
-- [ ] Extraire dès la conversion parquet un `extras.parquet` (match_id + `radiant_gold_adv`/`radiant_xp_adv`/`picks_bans` en JSON string)
-- [ ] Faire pointer `precompute_metrics.py` sur `extras.parquet` (plus besoin de raw JSON)
+- [x] Extraire dès la conversion parquet un `extras.parquet` (match_id + `radiant_gold_adv`/`radiant_xp_adv`/`picks_bans` en JSON string)
+- [x] Faire pointer `precompute_metrics.py` sur `extras.parquet` (plus besoin de raw JSON)
 - [ ] (Une fois complet) supprimer la dépendance à `data/raw/data_v2.json`
+
+Notes migration:
+- Pour backfill `extras.parquet` sans réécrire `players/objectives/...`, utiliser `make extras RAW=data/raw/data_v2.json OUT=data/processed` (streaming).
 
 Option 2:
 - [ ] Migrer l’historique: convertir `data/raw/data_v2.json` vers une arbo `data/raw/chunks_full/` (une fois) et ne garder que les chunks
@@ -139,4 +146,3 @@ players.select(pl.len(), pl.col("match_id").n_unique())
 ```bash
 make precompute OUT=data/processed METRICS_OUT=data/metrics
 ```
-

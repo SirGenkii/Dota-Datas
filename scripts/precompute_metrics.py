@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import polars as pl
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from src.dota_data import (
     read_processed_tables,
@@ -399,7 +404,7 @@ def compute_pick_outcomes(
         if mid is None or rad_id is None or dire_id is None or radiant_win is None:
             continue
         raw = raw_map.get(mid, {})
-        pb = raw.get("picks_bans") or []
+        pb = _parse_picks_bans(raw.get("picks_bans"))
         picks = [x for x in pb if x.get("is_pick")]
         first_pick_team = last_pick_team = None
         if picks:
@@ -619,6 +624,21 @@ def _parse_adv(val: object) -> List[float]:
     return []
 
 
+def _parse_picks_bans(val: object) -> List[dict]:
+    if val is None:
+        return []
+    if isinstance(val, list):
+        return [x for x in val if isinstance(x, dict)]
+    if isinstance(val, str):
+        try:
+            loaded = json.loads(val)
+        except json.JSONDecodeError:
+            return []
+        if isinstance(loaded, list):
+            return [x for x in loaded if isinstance(x, dict)]
+    return []
+
+
 def _bucketize_adv(val: float) -> str:
     for i in range(len(ADV_BUCKETS) - 1):
         if ADV_BUCKETS[i] <= val < ADV_BUCKETS[i + 1]:
@@ -632,7 +652,7 @@ def compute_draft_meta(matches: pl.DataFrame, raw_map: Dict[int, dict]) -> pl.Da
     for row in matches.iter_rows(named=True):
         mid = row.get("match_id")
         raw = raw_map.get(mid, {})
-        pb = raw.get("picks_bans") or []
+        pb = _parse_picks_bans(raw.get("picks_bans"))
         picks = [x for x in pb if x.get("is_pick")]
         first_pick_team = last_pick_team = None
         if picks:
@@ -1035,6 +1055,42 @@ def load_raw_map(raw_sources: Sequence[Path], match_ids: set[int]) -> Dict[int, 
     return raw_map
 
 
+def load_extras_map(processed_dir: Path, match_ids: set[int]) -> Dict[int, dict]:
+    """
+    Load a lightweight raw_map-like structure from processed `extras.parquet`.
+
+    The extras table stores JSON strings for:
+    - radiant_gold_adv
+    - radiant_xp_adv
+    - picks_bans
+    """
+    extras_path = processed_dir / "extras.parquet"
+    if not extras_path.exists():
+        return {}
+    cols = pl.scan_parquet(extras_path).collect_schema().names()
+    wanted = [c for c in ["match_id", "radiant_gold_adv", "radiant_xp_adv", "picks_bans"] if c in cols]
+    if "match_id" not in wanted:
+        return {}
+    df = pl.read_parquet(extras_path, columns=wanted)
+    if match_ids:
+        df = df.filter(pl.col("match_id").is_in(list(match_ids)))
+    out: Dict[int, dict] = {}
+    for r in df.iter_rows(named=True):
+        mid = r.get("match_id")
+        if mid is None:
+            continue
+        try:
+            mid_int = int(mid)
+        except Exception:
+            continue
+        out[mid_int] = {
+            "radiant_gold_adv": r.get("radiant_gold_adv"),
+            "radiant_xp_adv": r.get("radiant_xp_adv"),
+            "picks_bans": r.get("picks_bans"),
+        }
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(description="Precompute metrics (Elo, firsts) for tracked teams.")
     parser.add_argument("--processed", default="data/processed", help="Path to processed parquet dir.")
@@ -1044,7 +1100,7 @@ def main():
         "--raw",
         action="append",
         default=None,
-        help="Raw source (file or directory). Repeatable. If omitted, defaults to data/raw/data_v2.json and data/raw/updates (if present).",
+        help="Raw source (file or directory) fallback if processed extras.parquet is missing. Repeatable.",
     )
     parser.add_argument("--base-elo", type=float, default=1500.0, help="Base Elo for unseen teams.")
     parser.add_argument("--side-adv", type=float, default=20.0, help="Radiant side advantage in Elo calc.")
@@ -1085,15 +1141,27 @@ def main():
             if v is not None
         )
 
-    raw_args = args.raw if args.raw else ["data/raw/data_v2.json", "data/raw/updates"]
-    raw_sources = [Path(p) for p in raw_args if p]
-    existing_sources = [p for p in raw_sources if p.exists()]
-    if not existing_sources:
-        raise FileNotFoundError(f"No valid --raw sources found. Tried: {[str(p) for p in raw_sources]}")
-    raw_map = load_raw_map(existing_sources, match_ids=match_ids_needed)
-    if match_ids_needed and len(raw_map) < max(1, int(0.9 * len(match_ids_needed))):
+    raw_map = load_extras_map(processed_dir, match_ids=match_ids_needed)
+    source = "extras.parquet" if raw_map else None
+    if match_ids_needed and raw_map and len(raw_map) < max(1, int(0.9 * len(match_ids_needed))):
         missing = len(match_ids_needed) - len(raw_map)
-        print(f"[warn] raw_map coverage: {len(raw_map)}/{len(match_ids_needed)} (missing {missing})")
+        print(f"[warn] extras.parquet coverage: {len(raw_map)}/{len(match_ids_needed)} (missing {missing})")
+
+    if not raw_map:
+        raw_args = args.raw if args.raw else ["data/raw/data_v2.json", "data/raw/updates"]
+        raw_sources = [Path(p) for p in raw_args if p]
+        existing_sources = [p for p in raw_sources if p.exists()]
+        if not existing_sources:
+            raise FileNotFoundError(
+                f"No extras.parquet found in {processed_dir} and no valid --raw sources found. Tried: {[str(p) for p in raw_sources]}"
+            )
+        raw_map = load_raw_map(existing_sources, match_ids=match_ids_needed)
+        source = "raw_json"
+        if match_ids_needed and len(raw_map) < max(1, int(0.9 * len(match_ids_needed))):
+            missing = len(match_ids_needed) - len(raw_map)
+            print(f"[warn] raw_map coverage: {len(raw_map)}/{len(match_ids_needed)} (missing {missing})")
+
+    print(f"[info] raw payload source: {source} ({len(raw_map)} matches)")
     draft_meta = compute_draft_meta(matches_raw, raw_map)
 
     elo_hist, elo_latest, elo_patch_latest = compute_elo(

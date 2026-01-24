@@ -28,6 +28,12 @@ EXCLUDED_MATCH_KEYS = {
     "pauses",
 }
 
+EXTRAS_MATCH_KEYS = {
+    "radiant_gold_adv",
+    "radiant_xp_adv",
+    "picks_bans",
+}
+
 def _serialize_value(value: Any) -> Any:
     """Convert non-scalar values to JSON strings to keep parquet simple."""
     if isinstance(value, (dict, list)):
@@ -233,6 +239,16 @@ def infer_series_fields(matches: pl.DataFrame) -> pl.DataFrame:
         return matches
 
     df = matches
+    # Clean up from previous inference runs (older versions joined and kept *_right columns).
+    cleanup = [
+        c
+        for c in df.columns
+        if c.startswith("bo_type_right")
+        or c.startswith("teams_in_series_right")
+        or c.startswith("series_type_raw_right")
+    ]
+    if cleanup:
+        df = df.drop(cleanup)
     if "series_id" in df.columns and "leagueid" in df.columns:
         if "series_type" in df.columns and "series_type_raw" not in df.columns:
             df = df.with_columns(pl.col("series_type").alias("series_type_raw"))
@@ -293,15 +309,24 @@ def infer_series_fields(matches: pl.DataFrame) -> pl.DataFrame:
                 {
                     "series_id": rows_g[0].get("series_id"),
                     "leagueid": rows_g[0].get("leagueid"),
-                    "bo_type": bo_type,
-                    "teams_in_series": teams_in_series,
-                    "series_type_raw": series_type_raw,
+                    "bo_type_inferred": bo_type,
+                    "teams_in_series_inferred": teams_in_series,
                 }
             )
 
         if series_rows:
             series_df = pl.DataFrame(series_rows, strict=False)
             df = df.join(series_df, on=["series_id", "leagueid"], how="left")
+            bo_type_expr = pl.col("bo_type_inferred")
+            if "bo_type" in df.columns:
+                bo_type_expr = pl.coalesce([pl.col("bo_type_inferred"), pl.col("bo_type")])
+            teams_expr = pl.col("teams_in_series_inferred")
+            if "teams_in_series" in df.columns:
+                teams_expr = pl.coalesce([pl.col("teams_in_series_inferred"), pl.col("teams_in_series")])
+            df = df.with_columns(
+                bo_type_expr.alias("bo_type"),
+                teams_expr.alias("teams_in_series"),
+            ).drop([c for c in ["bo_type_inferred", "teams_in_series_inferred"] if c in df.columns])
             df = df.with_columns(pl.coalesce([pl.col("bo_type"), pl.col("series_type_raw")]).alias("series_type"))
 
     cast_cols = {}
@@ -339,6 +364,31 @@ def objectives_table(raw: Iterable[Dict[str, Any]]) -> pl.DataFrame:
             row["match_id"] = match_id
             row["objective_index"] = idx
             rows.append(row)
+    return _to_df(rows)
+
+
+def extras_table(raw: Iterable[Dict[str, Any]]) -> pl.DataFrame:
+    """
+    Store raw fields needed for downstream metrics without keeping a giant raw JSON file.
+
+    Columns:
+    - match_id
+    - radiant_gold_adv (JSON string)
+    - radiant_xp_adv (JSON string)
+    - picks_bans (JSON string)
+    """
+    rows: List[Dict[str, Any]] = []
+    for entry in raw:
+        match = entry.get("json", {}) if isinstance(entry, dict) else {}
+        if not isinstance(match, dict):
+            continue
+        mid = match.get("match_id")
+        if not isinstance(mid, int):
+            continue
+        row = {"match_id": mid}
+        for k in EXTRAS_MATCH_KEYS:
+            row[k] = _serialize_value(match.get(k))
+        rows.append(row)
     return _to_df(rows)
 
 
@@ -491,6 +541,7 @@ def write_parquet_tables(raw_path: Path | str, output_dir: Path | str, alias_pat
         "players": players_table(raw),
         "objectives": objectives_table(raw),
         "teamfights": teamfights_table(raw),
+        "extras": extras_table(raw),
     }
     tables["series"] = series_summary_table(tables["matches"])
 
@@ -538,6 +589,7 @@ def append_parquet_tables(
         "players": players_table(raw_list),
         "objectives": objectives_table(raw_list),
         "teamfights": teamfights_table(raw_list),
+        "extras": extras_table(raw_list),
     }
 
     paths: Dict[str, Path] = {}
@@ -565,6 +617,18 @@ def append_parquet_tables(
             merged = new_tables[name]
         merged.write_parquet(path)
         paths[name] = path
+
+    # Extras: union + dedup by match_id.
+    extras_path = out_dir / "extras.parquet"
+    if extras_path.exists():
+        old_extras = pl.read_parquet(extras_path)
+        merged_extras = pl.concat([old_extras, new_tables["extras"]], how="diagonal_relaxed")
+    else:
+        merged_extras = new_tables["extras"]
+    if "match_id" in merged_extras.columns:
+        merged_extras = merged_extras.unique(subset=["match_id"], keep="last")
+    merged_extras.write_parquet(extras_path)
+    paths["extras"] = extras_path
 
     # Series: recompute from full matches table.
     series_df = series_summary_table(merged_matches)
