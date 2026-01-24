@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import html
 import sys
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Tuple, List, Any
@@ -7,6 +9,7 @@ from datetime import datetime
 
 import pandas as pd
 import polars as pl
+import requests
 import streamlit as st
 import numpy as np
 import altair as alt
@@ -39,6 +42,33 @@ def _safe_pl_rows(rows: list[dict], schema: dict[str, pl.DataType]) -> pl.DataFr
             else:
                 cols[k].append(val)
     return pl.DataFrame(cols, schema=schema, strict=False)
+
+
+def _set_state(key: str, value: Any) -> None:
+    st.session_state[key] = value
+
+
+def _rank_range_state_key(team_id: Optional[int], title: str) -> str:
+    tid = "none" if team_id is None else str(int(team_id))
+    return f"rank_range_{tid}_{title}"
+
+
+def _overall_matches_count(df: Optional[pl.DataFrame]) -> int:
+    if df is None or df.is_empty():
+        return 0
+    if "matches" not in df.columns:
+        return 0
+    if "label" in df.columns:
+        overall = df.filter(pl.col("label") == "overall")
+        if not overall.is_empty():
+            try:
+                return int(overall["matches"][0] or 0)
+            except Exception:  # noqa: BLE001
+                return 0
+    try:
+        return int(df["matches"].max() or 0)
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 def _find_root() -> Path:
@@ -92,6 +122,10 @@ def load_tables(processed_dir: Path):
             "radiant_win",
             "radiant_name",
             "dire_name",
+            "radiant_logo",
+            "dire_logo",
+            "radiant_team",
+            "dire_team",
             "series_type",
             "bo_type",
             "series_id",
@@ -169,6 +203,37 @@ def _first_non_empty(*dfs: Optional[pl.DataFrame]) -> Optional[pl.DataFrame]:
             continue
         return df
     return None
+
+
+def _rank_system_label(ranking_df: Optional[pl.DataFrame]) -> str:
+    col = _rank_column(ranking_df)
+    if col == "score_rank":
+        return "Glicko-2 (score_rank)"
+    if col == "elo_rank":
+        return "Elo (elo_rank)"
+    if col == "rank":
+        return "Rank (rank)"
+    return "ranking"
+
+
+@st.cache_data(show_spinner=False)
+def _logo_data_uri(url: str) -> Optional[str]:
+    """
+    Fetch a remote logo and return a data: URI for inline HTML rendering.
+    Falls back to None if the fetch fails.
+    """
+    if not url:
+        return None
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        content_type = (resp.headers.get("content-type") or "image/png").split(";")[0].strip()
+        if not content_type.startswith("image/"):
+            content_type = "image/png"
+        b64 = base64.b64encode(resp.content).decode("ascii")
+        return f"data:{content_type};base64,{b64}"
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def load_team_options(teams_dict: pl.DataFrame, tracked_names: Optional[pl.DataFrame], teams_csv: Path) -> pl.DataFrame:
@@ -1354,18 +1419,33 @@ def team_block(
                 current_rating = cur["elo"][0]
                 rating_label = "Elo"
     if logo_url:
-        col_logo, col_label = st.columns([1, 5])
-        with col_logo:
-            st.image(logo_url)
-        with col_label:
-            st.subheader(label)
-            if current_rating is not None:
-                rank_txt = f" (rank #{int(current_rank)})" if current_rank is not None else ""
-                rd_txt = f" ±{float(current_rd):.1f}" if current_rd is not None else ""
-                st.markdown(
-                    f"<h3 style='margin-top:-10px;'>{rating_label}: {float(current_rating):.1f}{rd_txt}{rank_txt}</h3>",
-                    unsafe_allow_html=True,
-                )
+        safe_label = html.escape(label)
+        uri = _logo_data_uri(str(logo_url))
+        if uri:
+            safe_uri = html.escape(uri, quote=True)
+            st.markdown(
+                f"""
+                <div style="display:flex; align-items:center; gap:10px;">
+                <img src="{safe_uri}" style="max-width:128px; object-fit:contain;" />
+                <h3 style="margin:0;">{safe_label}</h3>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            # Fallback (still keeps title/logo on one row, but the logo will be aligned to the column edge)
+            col_title, col_logo = st.columns([8, 1], gap="small")
+            with col_title:
+                st.subheader(label)
+            with col_logo:
+                st.image(logo_url, width=128)
+        if current_rating is not None:
+            rank_txt = f"Rank #{int(current_rank)}" if current_rank is not None else ""
+            rd_txt = f" ±{float(current_rd):.1f}" if current_rd is not None else ""
+            st.markdown(
+                f"<h3 style='margin-top:-10px;'>{rank_txt} : {float(current_rating):.1f}{rd_txt} <span style=\"font-size:10px\">({rating_label}) </span></h3>",
+                unsafe_allow_html=True,
+            )
 
 
     else:
@@ -1388,6 +1468,11 @@ def team_block(
     if elo_latest is None or elo_latest.is_empty() or rank_col is None or players is None or players.is_empty():
         st.info("No ranking data (run make precompute).")
     else:
+        st.caption(
+            f"Filters this team's games by the opponent's {_rank_system_label(elo_latest)}. "
+            "Use the sidebar slider to select the opponent rank window (\"All ranks\" resets it). "
+            "Rows break down performance by side and first/last pick when draft data is available."
+        )
         max_rank = int(elo_latest[rank_col].max())
         team_rank = None
         if team_id is not None:
@@ -1397,21 +1482,18 @@ def team_block(
                 team_rank = None
         default_low = max(1, int(team_rank - 5)) if team_rank is not None else 1
         default_high = min(max_rank, int(team_rank + 5)) if team_rank is not None else min(50, max_rank)
-        rank_range_key = f"rank_range_{team_id}_{title}"
+        rank_range_key = _rank_range_state_key(team_id, title)
         default_range = (default_low, default_high)
-        rank_range = st.slider(
-            "Rank range",
-            min_value=1,
-            max_value=max_rank,
-            step=1,
-            value=st.session_state.get(rank_range_key, default_range),
-            key=rank_range_key,
-        )
-        col_reset = st.columns([1, 4])[0]
-        with col_reset:
-            if st.button("All ranks", key=f"all_ranks_{team_id}_{title}"):
-                st.session_state[rank_range_key] = (1, max_rank)
-                st.rerun()
+        rank_range = st.session_state.get(rank_range_key, default_range)
+        try:
+            low, high = int(rank_range[0]), int(rank_range[1])
+        except Exception:  # noqa: BLE001
+            low, high = default_range
+        low = max(1, min(low, max_rank))
+        high = max(1, min(high, max_rank))
+        if low > high:
+            low, high = high, low
+        rank_range = (low, high)
         include_opponent_range = True
 
         df_range = compute_rank_range_metrics(
@@ -1428,8 +1510,20 @@ def team_block(
             include_outside_opponents=False,
         )
 
-        matches_count_range = df_range["matches"].sum() if df_range is not None and not df_range.is_empty() else 0
-        st.markdown(f"<p>Ranks [{rank_range[0]}, {rank_range[1]}] — {int(matches_count_range)} games</p>", unsafe_allow_html=True)
+        matches_count_range = _overall_matches_count(df_range)
+        draft_split_coverage = 0
+        if df_range is not None and not df_range.is_empty() and "label" in df_range.columns and "matches" in df_range.columns:
+            try:
+                draft_split_coverage = int(df_range.filter(pl.col("label") != "overall")["matches"].sum() or 0)
+            except Exception:  # noqa: BLE001
+                draft_split_coverage = 0
+        if draft_split_coverage:
+            st.caption(
+                f"Ranks [{rank_range[0]}, {rank_range[1]}] — {int(matches_count_range)} games "
+                f"(draft-split available for {draft_split_coverage})."
+            )
+        else:
+            st.caption(f"Ranks [{rank_range[0]}, {rank_range[1]}] — {int(matches_count_range)} games.")
 
         if df_range is None or df_range.is_empty():
             st.info("No matches in this rank range.")
@@ -1483,6 +1577,10 @@ def team_block(
             st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
         st.subheader("Game duration (rank-range)")
+        st.caption(
+            "Distribution of match durations for this team, restricted to opponents inside the rank window above. "
+            "This helps compare playstyle/tempo vs stronger/weaker opponents."
+        )
         rank_range_duration = rank_range
         dur_range = durations_for_team_in_rank_range(
             team_id,
@@ -1620,6 +1718,10 @@ def team_block(
 
 
         st.subheader("Game duration (teams in range)")
+        st.caption(
+            "Distribution of match durations for ALL teams whose rank is inside the window. "
+            "Toggle the checkbox to include/exclude games vs opponents outside the rank window."
+        )
 
         # Duration view for all games of teams in the rank window
         teams_in_range: list[int] = []
@@ -1714,6 +1816,10 @@ def team_block(
     if series_team is not None and not series_team.is_empty():
         st.markdown("<hr>",unsafe_allow_html=True)
         st.subheader("Winrate by map_num and BO type")
+        st.caption(
+            "Series are reconstructed from `(leagueid, series_id)`. "
+            "Pick a BO type (BO3/BO5/...) to see the team's winrate on map 1/2/3/etc for that BO."
+        )
         df_team = series_stats_for_team(series_team, team_id).to_pandas()
         if not df_team.empty:
             # Map series_type to label
@@ -1746,6 +1852,10 @@ def team_block(
             # Series winner map win rate for teams in rank window
             st.subheader("Series winner map win rate (rank-range)")
             st.markdown("<p style='font-size:18px;'>How often the winner of the serie also win map number 1,2,3 etc..</p>", unsafe_allow_html=True)
+            st.caption(
+                f"Computed on series within the opponent rank window ({_rank_system_label(elo_latest)}). "
+                "Use the checkbox to require both teams inside the window (stricter) or allow out-of-range opponents."
+            )
 
             rank_range_series = rank_range
             include_outside_series = st.checkbox(
@@ -1842,6 +1952,10 @@ def team_block(
         st.markdown("<hr>",unsafe_allow_html=True)
 
         st.subheader("Minute (gold/xp buckets)")
+        st.caption(
+            "Buckets group games by gold/xp advantage at a specific minute. "
+            "Adjust the minute to see how early/mid-game advantage correlates with winning."
+        )
 
         min_choice = st.selectbox(
             "",
@@ -1858,6 +1972,10 @@ def team_block(
             gold_plot["bucket"] = pd.Categorical(gold_plot["bucket"], categories=cats, ordered=True)
             gold_plot = gold_plot.sort_values("bucket")
             st.subheader("Gold advantage buckets")
+            st.caption(
+                "Winrate conditional on the team's gold advantage bucket at the selected minute. "
+                "Positive buckets mean the team is ahead; negative buckets mean behind."
+            )
             chart = (
                 alt.Chart(gold_plot)
                 .mark_bar()
@@ -1896,6 +2014,9 @@ def team_block(
             xp_plot["bucket"] = pd.Categorical(xp_plot["bucket"], categories=cats_xp, ordered=True)
             xp_plot = xp_plot.sort_values("bucket")
             st.subheader("XP advantage buckets")
+            st.caption(
+                "Winrate conditional on the team's XP advantage bucket at the selected minute."
+            )
             chart_xp = (
                 alt.Chart(xp_plot)
                 .mark_bar()
@@ -2069,6 +2190,59 @@ def main():
         metrics.get("elo_latest_all"),
         metrics.get("elo_latest"),
     )
+
+    # Sidebar: per-team opponent rank range sliders (used by multiple blocks inside each team section).
+    st.sidebar.subheader("Opponent rank range")
+    rank_col = _rank_column(ranking_for_ranges)
+    if ranking_for_ranges is None or ranking_for_ranges.is_empty() or rank_col is None:
+        st.sidebar.info("No ranking data found (run make precompute).")
+    else:
+        max_rank = int(ranking_for_ranges[rank_col].max())
+
+        def sidebar_rank_slider(team_id: Optional[int], title: str, label: str) -> None:
+            if team_id is None:
+                return
+            team_rank = None
+            try:
+                team_rank = float(ranking_for_ranges.filter(pl.col("team_id") == team_id)[rank_col][0])
+            except Exception:
+                team_rank = None
+            default_low = max(1, int(team_rank - 5)) if team_rank is not None else 1
+            default_high = min(max_rank, int(team_rank + 5)) if team_rank is not None else min(50, max_rank)
+            default_range = (default_low, default_high)
+            key = _rank_range_state_key(team_id, title)
+
+            st.sidebar.markdown(f"**{label}**")
+            slider_label = f"Rank range ({label})"
+        
+            if key in st.session_state:
+                st.sidebar.slider(
+                    slider_label,
+                    min_value=1,
+                    max_value=max_rank,
+                    step=1,
+                    key=key,
+                )
+            else:
+                st.sidebar.slider(
+                    slider_label,
+                    min_value=1,
+                    max_value=max_rank,
+                    value=default_range,
+                    step=1,
+                    key=key,
+                )
+
+            st.sidebar.button(
+                    "All ranks",
+                    key=f"all_ranks_sidebar_{team_id}_{title}",
+                    on_click=_set_state,
+                    args=(key, (1, max_rank)),
+                )
+
+        sidebar_rank_slider(team_a_id, team_a, f"{team_a} (A)")
+        if team_b_id is not None:
+            sidebar_rank_slider(team_b_id, team_b, f"{team_b} (B)")
     if team_b_id is None:
         team_block(
             f"{team_a}",
@@ -2217,6 +2391,11 @@ def main():
             rank_b = rank_map.get(team_b_id) if team_b_id is not None else None
 
             st.subheader("Score vs teams of similar level")
+            st.caption(
+                f"Builds a 'similar opponents' set using {_rank_system_label(elo_latest)}. "
+                "The window (±) is centered on the other team's rank. "
+                "Use the checkbox to include/exclude the current opponent from the aggregation."
+            )
             rank_window = st.slider("Rank window (±)", min_value=1, max_value=20, value=5, step=1, key="rank_window_similar")
             include_opponent = st.checkbox("Include current opponent in similar-level stats", value=True, key="include_opponent_similar")
 
@@ -2241,7 +2420,7 @@ def main():
                     opponent_team_id=opponent_id,
                 )
 
-                matches_count = df_sim["matches"].sum() if df_sim is not None and not df_sim.is_empty() else 0
+                matches_count = _overall_matches_count(df_sim)
                 st.caption(f"{team_label} vs ranks [{target_rank-rank_window:.0f}, {target_rank+rank_window:.0f}] — {int(matches_count)} games")
 
                 if df_sim is None or df_sim.is_empty():
@@ -2259,6 +2438,7 @@ def main():
             timeline = h2h.get("timeline")
             if timeline is not None and not timeline.empty:
                 st.subheader("Recent H2H results (chronological)")
+                st.caption("Timeline of the most recent head-to-head games, in chronological order, with win/loss per team.")
                 # Build tidy data for both teams
                 tl = timeline.copy()
                 team_map = {team_a_id: team_a, team_b_id: team_b}
