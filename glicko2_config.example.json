@@ -1,0 +1,9 @@
+{
+  "base_rating": 1500.0,
+  "init_rd": 300.0,
+  "init_sigma": 0.06,
+  "tau": 0.5,
+  "period": "day",
+  "score_rd_mult": 2.0
+}
+

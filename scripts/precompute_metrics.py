@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,7 @@ from src.dota_data import (
     read_processed_tables,
     build_team_dictionary,
 )
+from src.dota_data.ratings import Glicko2Config, build_series_results, compute_glicko2_from_series
 
 SERIES_OVERRIDE_PATH = Path("data/mappings/series_overrides.csv")
 
@@ -67,7 +69,7 @@ def compute_elo(
     team_ids: List[int],
     base_elo: float = 1500.0,
     side_adv: float = 20.0,
-) -> Tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+) -> Tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame]:
     """
     Compute Elo for tracked teams (global + patch).
     - Only tracked teams are emitted in history/latest, but opponents can be untracked.
@@ -202,9 +204,13 @@ def compute_elo(
 
     hist_df = pl.DataFrame(history_rows, strict=False)
 
-    # Latest global Elo
+    # Latest global Elo (tracked)
     latest_rows = [{"team_id": tid, "elo": state.get(tid, {}).get("global", {}).get("elo", base_elo)} for tid in tracked]
     latest_df = pl.DataFrame(latest_rows, strict=False).sort("elo", descending=True)
+
+    # Latest global Elo (all teams seen in matches)
+    latest_all_rows = [{"team_id": tid, "elo": st.get("global", {}).get("elo", base_elo)} for tid, st in state.items()]
+    latest_all_df = pl.DataFrame(latest_all_rows, strict=False).sort("elo", descending=True)
 
     # Latest patch Elo
     patch_rows = []
@@ -216,7 +222,7 @@ def compute_elo(
     if not patch_latest.is_empty():
         patch_latest = patch_latest.sort(["patch", "elo"], descending=[False, True])
 
-    return hist_df, latest_df, patch_latest
+    return hist_df, latest_df, patch_latest, latest_all_df
 
 
 def compute_firsts(matches: pl.DataFrame, objectives: pl.DataFrame, players: pl.DataFrame, tracked_ids: List[int]) -> pl.DataFrame:
@@ -1102,8 +1108,40 @@ def main():
         default=None,
         help="Raw source (file or directory) fallback if processed extras.parquet is missing. Repeatable.",
     )
+    parser.add_argument(
+        "--extras-min-coverage",
+        type=float,
+        default=0.9,
+        help="Minimum fraction of matches that must have extras payloads (adv arrays + picks/bans).",
+    )
+    parser.add_argument(
+        "--allow-partial-extras",
+        action="store_true",
+        help="Allow precompute even if extras coverage is below --extras-min-coverage (metrics may be inconsistent).",
+    )
     parser.add_argument("--base-elo", type=float, default=1500.0, help="Base Elo for unseen teams.")
     parser.add_argument("--side-adv", type=float, default=20.0, help="Radiant side advantage in Elo calc.")
+    parser.add_argument("--glicko-base", type=float, default=1500.0, help="Glicko-2 base rating.")
+    parser.add_argument("--glicko-init-rd", type=float, default=350.0, help="Glicko-2 initial rating deviation (RD).")
+    parser.add_argument("--glicko-init-sigma", type=float, default=0.06, help="Glicko-2 initial volatility (sigma).")
+    parser.add_argument("--glicko-tau", type=float, default=0.5, help="Glicko-2 tau (volatility constraint).")
+    parser.add_argument(
+        "--glicko-period",
+        choices=["day", "week", "series"],
+        default="day",
+        help="Glicko-2 rating period batching (affects inactivity/RD drift).",
+    )
+    parser.add_argument(
+        "--glicko-score-rd-mult",
+        type=float,
+        default=2.0,
+        help="Conservative score = rating - mult*RD (used to compute score_rank).",
+    )
+    parser.add_argument(
+        "--glicko-config",
+        default=None,
+        help="Optional JSON file to override Glicko-2 parameters (keys: base_rating, init_rd, init_sigma, tau, period, score_rd_mult).",
+    )
     args = parser.parse_args()
 
     processed_dir = Path(args.processed)
@@ -1143,9 +1181,31 @@ def main():
 
     raw_map = load_extras_map(processed_dir, match_ids=match_ids_needed)
     source = "extras.parquet" if raw_map else None
-    if match_ids_needed and raw_map and len(raw_map) < max(1, int(0.9 * len(match_ids_needed))):
+    extras_min_coverage = max(0.0, min(1.0, float(args.extras_min_coverage)))
+    if match_ids_needed and raw_map:
         missing = len(match_ids_needed) - len(raw_map)
-        print(f"[warn] extras.parquet coverage: {len(raw_map)}/{len(match_ids_needed)} (missing {missing})")
+        coverage = len(raw_map) / max(1, len(match_ids_needed))
+        if coverage < extras_min_coverage:
+            raw_sources = [Path(p) for p in (args.raw or []) if p]
+            existing_sources = [p for p in raw_sources if p.exists()]
+            if existing_sources:
+                missing_ids = set(int(mid) for mid in match_ids_needed if int(mid) not in raw_map)
+                if missing_ids:
+                    raw_map.update(load_raw_map(existing_sources, match_ids=missing_ids))
+                    missing = len(match_ids_needed) - len(raw_map)
+                    coverage = len(raw_map) / max(1, len(match_ids_needed))
+
+            msg = f"extras coverage: {len(raw_map)}/{len(match_ids_needed)} ({coverage:.1%})"
+            if not args.allow_partial_extras and coverage < extras_min_coverage:
+                raise RuntimeError(
+                    f"{msg} is below --extras-min-coverage={extras_min_coverage:.0%}. "
+                    "Run `make extras OUT=data/processed OVERWRITE=1` on a machine that has the raw match payloads "
+                    "(e.g. `EXTRAS_RAW_SOURCES=\"backup/data/raw/data_v2.json data/raw/updates\"`), then re-run precompute. "
+                    "Or pass --allow-partial-extras to proceed anyway."
+                )
+            print(f"[warn] {msg} (missing {missing})")
+        elif missing > 0:
+            print(f"[info] extras.parquet coverage: {len(raw_map)}/{len(match_ids_needed)} (missing {missing})")
 
     if not raw_map:
         raw_args = args.raw if args.raw else ["data/raw/data_v2.json", "data/raw/updates"]
@@ -1157,14 +1217,45 @@ def main():
             )
         raw_map = load_raw_map(existing_sources, match_ids=match_ids_needed)
         source = "raw_json"
-        if match_ids_needed and len(raw_map) < max(1, int(0.9 * len(match_ids_needed))):
+        if match_ids_needed:
             missing = len(match_ids_needed) - len(raw_map)
-            print(f"[warn] raw_map coverage: {len(raw_map)}/{len(match_ids_needed)} (missing {missing})")
+            coverage = len(raw_map) / max(1, len(match_ids_needed))
+            if not args.allow_partial_extras and coverage < extras_min_coverage:
+                raise RuntimeError(
+                    f"raw payload coverage: {len(raw_map)}/{len(match_ids_needed)} ({coverage:.1%}) is below "
+                    f"--extras-min-coverage={extras_min_coverage:.0%}. "
+                    "Provide more --raw sources or generate a complete `extras.parquet` and re-run."
+                )
+            if missing > 0:
+                print(f"[warn] raw payload coverage: {len(raw_map)}/{len(match_ids_needed)} (missing {missing})")
 
     print(f"[info] raw payload source: {source} ({len(raw_map)} matches)")
     draft_meta = compute_draft_meta(matches_raw, raw_map)
 
-    elo_hist, elo_latest, elo_patch_latest = compute_elo(
+    # Glicko config resolution order:
+    # 1) CLI --glicko-config
+    # 2) env var DOTA_DATA_GLICKO_CONFIG
+    # 3) repo-local glicko2_config.json (gitignored)
+    if not args.glicko_config:
+        args.glicko_config = os.environ.get("DOTA_DATA_GLICKO_CONFIG") or None
+    if not args.glicko_config and Path("glicko2_config.json").exists():
+        args.glicko_config = "glicko2_config.json"
+
+    if args.glicko_config:
+        cfg_path = Path(args.glicko_config)
+        if not cfg_path.exists():
+            raise FileNotFoundError(f"Glicko config not found: {cfg_path}")
+        loaded = json.loads(cfg_path.read_text(encoding="utf-8"))
+        if not isinstance(loaded, dict):
+            raise ValueError(f"--glicko-config must be a JSON object, got: {type(loaded)}")
+        args.glicko_base = loaded.get("base_rating", args.glicko_base)
+        args.glicko_init_rd = loaded.get("init_rd", args.glicko_init_rd)
+        args.glicko_init_sigma = loaded.get("init_sigma", args.glicko_init_sigma)
+        args.glicko_tau = loaded.get("tau", args.glicko_tau)
+        args.glicko_period = loaded.get("period", args.glicko_period)
+        args.glicko_score_rd_mult = loaded.get("score_rd_mult", args.glicko_score_rd_mult)
+
+    elo_hist, elo_latest, elo_patch_latest, elo_latest_all = compute_elo(
         matches_raw,
         team_ids=team_ids,
         base_elo=args.base_elo,
@@ -1172,6 +1263,7 @@ def main():
     )
     # Add leaderboard rank (1 = highest elo)
     elo_latest = elo_latest.with_columns(pl.col("elo").rank(method="dense", descending=True).alias("elo_rank"))
+    elo_latest_all = elo_latest_all.with_columns(pl.col("elo").rank(method="dense", descending=True).alias("elo_rank"))
     if elo_patch_latest is not None and not elo_patch_latest.is_empty():
         elo_patch_latest = elo_patch_latest.with_columns(
             pl.col("elo").rank(method="dense", descending=True).over("patch").alias("elo_rank")
@@ -1184,8 +1276,25 @@ def main():
     series_maps, series_team_stats = compute_series_maps(matches_raw, tracked_ids=team_ids)
     pick_outcomes = compute_pick_outcomes(matches_raw, objectives, tables["players"], raw_map=raw_map, tracked_ids=team_ids)
 
+    # Glicko-2 computed on series outcomes (leagueid + series_id), not per-map.
+    series_results = build_series_results(matches_raw)
+    glicko_cfg = Glicko2Config(
+        base_rating=float(args.glicko_base),
+        init_rd=float(args.glicko_init_rd),
+        init_sigma=float(args.glicko_init_sigma),
+        tau=float(args.glicko_tau),
+        period=str(args.glicko_period),
+        score_rd_mult=float(args.glicko_score_rd_mult),
+    )
+    glicko_ts, glicko_latest_tracked, glicko_latest_all = compute_glicko2_from_series(
+        series_results,
+        tracked_team_ids=team_ids,
+        config=glicko_cfg,
+    )
+
     elo_hist.write_parquet(out_dir / "elo_timeseries.parquet")
     elo_latest.write_parquet(out_dir / "elo_latest.parquet")
+    elo_latest_all.write_parquet(out_dir / "elo_latest_all.parquet")
     if elo_patch_latest is not None and not elo_patch_latest.is_empty():
         elo_patch_latest.write_parquet(out_dir / "elo_patch_latest.parquet")
     firsts.write_parquet(out_dir / "firsts.parquet")
@@ -1198,10 +1307,27 @@ def main():
     pick_outcomes.write_parquet(out_dir / "pick_outcomes.parquet")
     draft_meta.write_parquet(out_dir / "draft_meta.parquet")
     adv_snapshots.write_parquet(out_dir / "adv_snapshots.parquet")
+    if series_results is not None and not series_results.is_empty():
+        series_results.write_parquet(out_dir / "series_results.parquet")
+    if glicko_latest_all is not None and not glicko_latest_all.is_empty():
+        glicko_latest_all.write_parquet(out_dir / "glicko2_latest_all.parquet")
+    if glicko_latest_tracked is not None and not glicko_latest_tracked.is_empty():
+        glicko_latest_tracked.write_parquet(out_dir / "glicko2_latest.parquet")
+    if glicko_ts is not None and not glicko_ts.is_empty():
+        glicko_ts.write_parquet(out_dir / "glicko2_timeseries.parquet")
 
     print("Metrics written:")
     print(f"- Elo history: {out_dir / 'elo_timeseries.parquet'} ({elo_hist.shape})")
     print(f"- Elo latest: {out_dir / 'elo_latest.parquet'} ({elo_latest.shape})")
+    print(f"- Elo latest (all teams): {out_dir / 'elo_latest_all.parquet'} ({elo_latest_all.shape})")
+    if series_results is not None and not series_results.is_empty():
+        print(f"- Series results (for ratings): {out_dir / 'series_results.parquet'} ({series_results.shape})")
+    if glicko_latest_all is not None and not glicko_latest_all.is_empty():
+        print(f"- Glicko2 latest (all teams): {out_dir / 'glicko2_latest_all.parquet'} ({glicko_latest_all.shape})")
+    if glicko_latest_tracked is not None and not glicko_latest_tracked.is_empty():
+        print(f"- Glicko2 latest (tracked): {out_dir / 'glicko2_latest.parquet'} ({glicko_latest_tracked.shape})")
+    if glicko_ts is not None and not glicko_ts.is_empty():
+        print(f"- Glicko2 timeseries (tracked): {out_dir / 'glicko2_timeseries.parquet'} ({glicko_ts.shape})")
     if elo_patch_latest is not None and not elo_patch_latest.is_empty():
         print(f"- Elo patch latest: {out_dir / 'elo_patch_latest.parquet'} ({elo_patch_latest.shape})")
     print(f"- Firsts: {out_dir / 'firsts.parquet'} ({firsts.shape})")

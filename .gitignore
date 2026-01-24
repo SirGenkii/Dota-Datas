@@ -141,6 +141,8 @@ secrets/
 *.ppk
 *.key
 
+
+
 # Temporary sync staging
 .sync_tmp/
 .sync_test/

@@ -86,7 +86,9 @@ Default RAW/OUT are set in the Makefile (`data/raw/data_v2.json` -> `data/proces
 
 If you want to avoid rewriting the big parquets and only create the “raw fields needed for metrics”:
 ```bash
-make extras RAW=data/raw/data_v2.json OUT=data/processed
+make extras OUT=data/processed OVERWRITE=1
+# or (multiple sources, e.g. historic raw + update chunks):
+make extras EXTRAS_RAW_SOURCES="backup/data/raw/data_v2.json data/raw/updates" OUT=data/processed OVERWRITE=1
 ```
 This generates `data/processed/extras.parquet` (adv arrays + picks/bans) so `precompute` no longer needs raw JSON.
 
@@ -95,8 +97,12 @@ Compute Elo, firsts, Roshan/Aegis, gold/xp buckets, series stats:
 ```bash
 make precompute OUT=data/processed METRICS_OUT=data/metrics
 ```
+If `precompute` fails with an “extras coverage” error, regenerate `data/processed/extras.parquet` with `make extras` (or pass `--allow-partial-extras` to `scripts/precompute_metrics.py` to force it).
+
 Generates:
-- `data/metrics/elo_timeseries.parquet`, `elo_latest.parquet`
+- `data/metrics/elo_timeseries.parquet`, `elo_latest.parquet`, `elo_latest_all.parquet`
+- `data/metrics/glicko2_latest.parquet`, `glicko2_latest_all.parquet`, `glicko2_timeseries.parquet` (Glicko-2 is computed on *series outcomes*, keyed by `(leagueid, series_id)`)
+- `data/metrics/series_results.parquet` (one row per series; used as the rating input)
 - `firsts.parquet`
 - `roshan.parquet`
 - `gold_buckets.parquet`, `xp_buckets.parquet`
@@ -104,6 +110,16 @@ Generates:
 - `tracked_teams.parquet`
 - `draft_meta.parquet` (first/last pick team per match)
 - `adv_snapshots.parquet` (gold/xp advantage snapshot per tracked team & minute)
+
+Optional: grid-search Glicko-2 hyperparameters (writes `data/metrics/glicko2_calibration.json`):
+```bash
+make calibrate-glicko OUT=data/processed METRICS_OUT=data/metrics
+```
+
+To pin Glicko-2 parameters for `precompute`, copy `glicko2_config.example.json` to `glicko2_config.json` and run:
+```bash
+make precompute OUT=data/processed METRICS_OUT=data/metrics GLICKO_CONFIG=glicko2_config.json
+```
 
 ## Sharing data artifacts (VPS sync)
 If you don’t want to use Git LFS for large parquet files, you can share data via `rsync` over SSH to a VPS. The sync is snapshot-based: each upload creates a new dated snapshot directory on the server, and download pulls the latest snapshot (with a confirmation prompt before overwriting local files).

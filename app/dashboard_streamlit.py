@@ -110,6 +110,7 @@ def load_metrics(metrics_dir: Path):
     files = {
         "elo_hist": metrics_dir / "elo_timeseries.parquet",
         "elo_latest": metrics_dir / "elo_latest.parquet",
+        "elo_latest_all": metrics_dir / "elo_latest_all.parquet",
         "firsts": metrics_dir / "firsts.parquet",
         "roshan": metrics_dir / "roshan.parquet",
         "gold_buckets": metrics_dir / "gold_buckets.parquet",
@@ -1325,23 +1326,21 @@ def team_block(
                 team_rank = None
         default_low = max(1, int(team_rank - 5)) if team_rank is not None else 1
         default_high = min(max_rank, int(team_rank + 5)) if team_rank is not None else min(50, max_rank)
-        key_range = f"rank_range_top_{team_id}_{title}"
-        key_range_dur = f"rank_range_dur_{team_id}_{title}"
-
-        col_reset = st.columns([1, 4])[0]
-        with col_reset:
-            if st.button("All ranks", key=f"all_ranks_top_{team_id}_{title}"):
-                st.session_state[key_range] = (1, max_rank)
-
-        range_default = st.session_state.get(key_range, (default_low, default_high))
+        rank_range_key = f"rank_range_{team_id}_{title}"
+        default_range = (default_low, default_high)
         rank_range = st.slider(
             "Rank range",
             min_value=1,
             max_value=max_rank,
             step=1,
-            value=range_default,
-            key=key_range,
+            value=st.session_state.get(rank_range_key, default_range),
+            key=rank_range_key,
         )
+        col_reset = st.columns([1, 4])[0]
+        with col_reset:
+            if st.button("All ranks", key=f"all_ranks_{team_id}_{title}"):
+                st.session_state[rank_range_key] = (1, max_rank)
+                st.rerun()
         include_opponent_range = True
 
         df_range = compute_rank_range_metrics(
@@ -1357,28 +1356,9 @@ def team_block(
             opponent_team_id=opponent_team_id,
             include_outside_opponents=False,
         )
-        eligible = []
-        if elo_latest is not None and not elo_latest.is_empty():
-            for r in elo_latest.iter_rows(named=True):
-                tid = r.get("team_id")
-                trk = r.get("elo_rank")
-                if tid is None or trk is None:
-                    continue
-                if not (rank_range[0] <= trk <= rank_range[1]):
-                    continue
-                if not include_opponent_range and opponent_team_id is not None and tid == opponent_team_id:
-                    continue
-                name = id_to_name.get(int(tid)) if id_to_name is not None else None
-                name = name or r.get("name") or str(tid)
-                eligible.append((tid, name, trk))
 
         matches_count_range = df_range["matches"].sum() if df_range is not None and not df_range.is_empty() else 0
         st.markdown(f"<p>Ranks [{rank_range[0]}, {rank_range[1]}] — {int(matches_count_range)} games</p>", unsafe_allow_html=True)
-
-        if eligible:
-            with st.expander("Teams in range (by rank)", expanded=False):
-                lines = [f"- {name} (rank {int(rank)})" for _, name, rank in sorted(eligible, key=lambda x: x[2])]
-                st.markdown("\n".join(lines))
 
         if df_range is None or df_range.is_empty():
             st.info("No matches in this rank range.")
@@ -1427,164 +1407,12 @@ def team_block(
                         "Aegis steal %": pct(r["aegis_steal_rate"]),
                         "Aegis stolen %": pct(r["aegis_steal_against_rate"]),
                         "Games": int(r["matches"]),
-            }
-        )
+                    }
+                )
             st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
-        # Aggregate view for all teams in the rank window (top 5 by games)
-        teams_in_range = []
-        if elo_latest is not None and not elo_latest.is_empty():
-            for r in elo_latest.iter_rows(named=True):
-                tid = r.get("team_id")
-                trk = r.get("elo_rank")
-                if tid is None or trk is None:
-                    continue
-                if rank_range[0] <= trk <= rank_range[1]:
-                    teams_in_range.append(int(tid))
-        
-        # Global combo/aegis across teams in range (not team-oriented)
-        def aggregate_range_metrics(tids: list[int]):
-            labels_order = [
-                ("overall", "Overall"),
-                ("radiant_first_pick", "Radiant first pick"),
-                ("radiant_last_pick", "Radiant last pick"),
-                ("dire_first_pick", "Dire first pick"),
-                ("dire_last_pick", "Dire last pick"),
-            ]
-            accum = {k: {"matches": 0, "combo_sum": 0.0, "aegis_sum": 0.0} for k, _ in labels_order}
-            for tid in tids:
-                df_team = compute_rank_range_metrics(
-                    tid,
-                    matches_raw,
-                    objectives,
-                    players,
-                    metrics.get("draft_meta"),
-                    elo_latest,
-                    rank_min=rank_range[0],
-                    rank_max=rank_range[1],
-                    include_opponent=True,
-                    opponent_team_id=None,
-                    include_outside_opponents=include_cross_range,
-                )
-                if df_team is None or df_team.is_empty():
-                    continue
-                for row in df_team.iter_rows(named=True):
-                    lbl = row.get("label")
-                    if lbl not in accum:
-                        continue
-                    m = row.get("matches") or 0
-                    combo = row.get("combo_for_rate")
-                    aegis = row.get("aegis_steal_rate")
-                    accum[lbl]["matches"] += m
-                    if combo is not None:
-                        accum[lbl]["combo_sum"] += m * combo
-                    if aegis is not None:
-                        accum[lbl]["aegis_sum"] += m * aegis
-            rows_out = []
-            for key, label_txt in labels_order:
-                m = accum[key]["matches"]
-                if m <= 0:
-                    continue
-                combo_pct = accum[key]["combo_sum"] / m if m else None
-                aegis_pct = accum[key]["aegis_sum"] / m if m else None
-                rows_out.append(
-                    {
-                        "Context": label_txt,
-                        "Combo %": f"{combo_pct*100:.1f}%" if combo_pct is not None else "N/A",
-                        "Aegis steal %": f"{aegis_pct*100:.1f}%" if aegis_pct is not None else "N/A",
-                        "Games": int(m),
-                    }
-                )
-            return rows_out
-
-        # Apply include_outside_combo toggle for global aggregation
-        def aggregate_range_metrics(tids: list[int], include_outside: bool):
-            labels_order = [
-                ("overall", "Overall"),
-                ("radiant_first_pick", "Radiant first pick"),
-                ("radiant_last_pick", "Radiant last pick"),
-                ("dire_first_pick", "Dire first pick"),
-                ("dire_last_pick", "Dire last pick"),
-            ]
-            accum = {k: {"matches": 0, "combo_sum": 0.0, "aegis_sum": 0.0} for k, _ in labels_order}
-            for tid in tids:
-                df_team = compute_rank_range_metrics(
-                    tid,
-                    matches_raw,
-                    objectives,
-                    players,
-                    metrics.get("draft_meta"),
-                    elo_latest,
-                    rank_min=rank_range[0],
-                    rank_max=rank_range[1],
-                    include_opponent=True,
-                    opponent_team_id=None,
-                    include_outside_opponents=include_outside,
-                )
-                if df_team is None or df_team.is_empty():
-                    continue
-                for row in df_team.iter_rows(named=True):
-                    lbl = row.get("label")
-                    if lbl not in accum:
-                        continue
-                    m = row.get("matches") or 0
-                    combo = row.get("combo_for_rate")
-                    aegis = row.get("aegis_steal_rate")
-                    accum[lbl]["matches"] += m
-                    if combo is not None:
-                        accum[lbl]["combo_sum"] += m * combo
-                    if aegis is not None:
-                        accum[lbl]["aegis_sum"] += m * aegis
-            rows_out = []
-            for key, label_txt in labels_order:
-                m = accum[key]["matches"]
-                if m <= 0:
-                    continue
-                combo_pct = accum[key]["combo_sum"] / m if m else None
-                aegis_pct = accum[key]["aegis_sum"] / m if m else None
-                rows_out.append(
-                    {
-                        "Context": label_txt,
-                        "Combo %": f"{combo_pct*100:.1f}%" if combo_pct is not None else "N/A",
-                        "Aegis steal %": f"{aegis_pct*100:.1f}%" if aegis_pct is not None else "N/A",
-                        "Games": int(m),
-                    }
-                )
-            return rows_out
-
-        if teams_in_range:
-
-            st.subheader("All teams in range — combo & aegis frequency")
-            include_outside_combo = st.checkbox(
-                                "Inclure les matchs contre des équipes hors range (combo/aegis)",
-                                value=True,
-                                key=f"include_cross_range_combo_{team_id}_{title}",
-                                help="When unchecked, only games where the opponent is also inside the rank window are kept for this block.",
-                            )
-
-            agg_global_rows = aggregate_range_metrics(teams_in_range, include_outside_combo)
-            if agg_global_rows:
-                st.dataframe(pd.DataFrame(agg_global_rows), use_container_width=True)
-
-
-
         st.subheader("Game duration (rank-range)")
-        
-        # Duration view for this rank range
-        dur_reset_col = st.columns([1, 4])[0]
-        with dur_reset_col:
-            if st.button("All ranks (durations)", key=f"all_ranks_dur_{team_id}_{title}"):
-                st.session_state[key_range_dur] = (1, max_rank)
-
-        range_default_dur = st.session_state.get(key_range_dur, (default_low, default_high))
-        rank_range_duration = st.slider(
-            "Rank range (durations)",
-            min_value=1,
-            max_value=max_rank,
-            step=1,
-            value=range_default_dur,
-            key=key_range_dur,
-        )
+        rank_range_duration = rank_range
         dur_range = durations_for_team_in_rank_range(
             team_id,
             matches_raw,
@@ -1723,6 +1551,16 @@ def team_block(
         st.subheader("Game duration (teams in range)")
 
         # Duration view for all games of teams in the rank window
+        teams_in_range: list[int] = []
+        if elo_latest is not None and not elo_latest.is_empty() and "elo_rank" in elo_latest.columns and "team_id" in elo_latest.columns:
+            teams_in_range = (
+                elo_latest.filter(pl.col("elo_rank").is_between(rank_range_duration[0], rank_range_duration[1]))
+                .select(pl.col("team_id").cast(pl.Int64, strict=False))
+                .drop_nulls()
+                .get_column("team_id")
+                .to_list()
+            )
+
         include_outside_dur_all = st.checkbox(
             "Include out-of-range opponents for durations (teams in range)",
             value=True,
@@ -1837,25 +1675,7 @@ def team_block(
             st.subheader("Series winner map win rate (rank-range)")
             st.markdown("<p style='font-size:18px;'>How often the winner of the serie also win map number 1,2,3 etc..</p>", unsafe_allow_html=True)
 
-            max_rank_series = int(elo_latest["elo_rank"].max()) if elo_latest is not None and "elo_rank" in elo_latest.columns else 50
-            series_range_key = f"rank_range_series_{team_id}_{title}"
-            default_low_series = max(1, int(current_rank - 5)) if current_rank is not None else 1
-            default_high_series = min(max_rank_series, int(current_rank + 5)) if current_rank is not None else min(50, max_rank_series)
-            if series_range_key not in st.session_state:
-                st.session_state[series_range_key] = (default_low_series, default_high_series)
-
-            col_reset_series = st.columns([1, 4])[0]
-            with col_reset_series:
-                if st.button("All ranks", key=f"all_ranks_series_{team_id}_{title}"):
-                    st.session_state[series_range_key] = (1, max_rank_series)
-
-            rank_range_series = st.slider(
-                "Rank range (series maps)",
-                min_value=1,
-                max_value=max_rank_series,
-                step=1,
-                key=series_range_key,
-            )
+            rank_range_series = rank_range
             include_outside_series = st.checkbox(
                 "Include out-of-range opponents (series maps)",
                 value=True,
@@ -1873,7 +1693,7 @@ def team_block(
             bo_choice_code = inv_bo.get(bo_choice_label, 3)
             shares = series_winner_map_share(
                 matches_raw,
-                metrics.get("elo_latest"),
+                elo_latest,
                 bo_type=bo_choice_code,
                 rank_min=rank_range_series[0],
                 rank_max=rank_range_series[1],
@@ -1881,7 +1701,7 @@ def team_block(
             )
             score_dist = series_score_distribution(
                 matches_raw,
-                metrics.get("elo_latest"),
+                elo_latest,
                 bo_type=bo_choice_code,
                 rank_min=rank_range_series[0],
                 rank_max=rank_range_series[1],
@@ -2173,6 +1993,7 @@ def main():
         )
 
     if team_b_id is None:
+        elo_for_ranks = metrics.get("elo_latest_all") or metrics.get("elo_latest")
         team_block(
             f"{team_a}",
             team_a_id,
@@ -2184,10 +2005,11 @@ def main():
             objectives=objectives,
             players=tables["players"],
             adv_snapshots=metrics.get("adv_snapshots"),
-            elo_latest=metrics.get("elo_latest"),
+            elo_latest=elo_for_ranks,
             id_to_name=id_to_name,
         )
     else:
+        elo_for_ranks = metrics.get("elo_latest_all") or metrics.get("elo_latest")
         st.markdown(
             """
             <style>
@@ -2219,7 +2041,7 @@ def main():
                 objectives=objectives,
                 players=tables["players"],
                 adv_snapshots=metrics.get("adv_snapshots"),
-                elo_latest=metrics.get("elo_latest"),
+                elo_latest=elo_for_ranks,
                 id_to_name=id_to_name,
                 opponent_team_id=team_b_id,
             )
@@ -2242,7 +2064,7 @@ def main():
                 objectives=objectives,
                 players=tables["players"],
                 adv_snapshots=metrics.get("adv_snapshots"),
-                elo_latest=metrics.get("elo_latest"),
+                elo_latest=elo_for_ranks,
                 id_to_name=id_to_name,
                 opponent_team_id=team_a_id,
             )
@@ -2310,7 +2132,7 @@ def main():
                 render_h2h_table(h2h["team_b"], team_b)
 
             # Similar-level outcomes (rank window)
-            elo_latest = metrics.get("elo_latest")
+            elo_latest = metrics.get("elo_latest_all") or metrics.get("elo_latest")
             rank_map = {}
             if elo_latest is not None and "elo_rank" in elo_latest.columns:
                 rank_map = {int(r["team_id"]): r.get("elo_rank") for r in elo_latest.iter_rows(named=True) if r.get("team_id") is not None}
@@ -2341,28 +2163,9 @@ def main():
                     include_opponent=include_opponent,
                     opponent_team_id=opponent_id,
                 )
-                # List eligible teams for the window
-                eligible = []
-                if elo_latest is not None and not elo_latest.is_empty():
-                    for r in elo_latest.iter_rows(named=True):
-                        tid = r.get("team_id")
-                        trk = r.get("elo_rank")
-                        if tid is None or trk is None:
-                            continue
-                        if not (target_rank - rank_window <= trk <= target_rank + rank_window):
-                            continue
-                        if not include_opponent and opponent_id is not None and tid == opponent_id:
-                            continue
-                        name = id_to_name.get(int(tid)) or r.get("name") or str(tid)
-                        eligible.append((tid, name, trk))
 
                 matches_count = df_sim["matches"].sum() if df_sim is not None and not df_sim.is_empty() else 0
                 st.caption(f"{team_label} vs ranks [{target_rank-rank_window:.0f}, {target_rank+rank_window:.0f}] — {int(matches_count)} games")
-
-                if eligible:
-                    with st.expander("Teams in range", expanded=False):
-                        lines = [f"- {name} (rank {int(rank)})" for _, name, rank in sorted(eligible, key=lambda x: x[2])]
-                        st.markdown("\n".join(lines))
 
                 if df_sim is None or df_sim.is_empty():
                     st.info("No similar-level matches.")

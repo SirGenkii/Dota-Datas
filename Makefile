@@ -4,6 +4,7 @@ PIP := $(VENV)/bin/pip
 
 .PHONY: venv install activate notebook deps-clean parquet extras update healthcheck
 .PHONY: sync-upload sync-download precompute-upload
+.PHONY: calibrate-glicko
 .PHONY: prune
 
 venv:
@@ -32,10 +33,13 @@ parquet: install
 	$(PYTHON) -m src.dota_data.io --raw $(RAW) --out $(OUT) --aliases $(ALIASES)
 
 # Génère uniquement `extras.parquet` (adv arrays + picks/bans) depuis le raw, sans réécrire players/objectives/etc.
-# Usage: make extras [RAW=data/raw/data_v2.json] [OUT=data/processed] [OVERWRITE=1]
+# Usage:
+#   make extras OUT=data/processed OVERWRITE=1
+#   make extras EXTRAS_RAW_SOURCES="backup/data/raw/data_v2.json data/raw/updates" OUT=data/processed OVERWRITE=1
 OVERWRITE ?= 0
+EXTRAS_RAW_SOURCES ?= data/raw/data_v2.json data/raw/updates
 extras: install
-	PYTHONPATH=. $(PYTHON) -m src.dota_data.extras --raw $(RAW) --out $(OUT) $(if $(filter 1 true yes,$(OVERWRITE)),--overwrite,)
+	PYTHONPATH=. $(PYTHON) -m src.dota_data.extras $(foreach s,$(EXTRAS_RAW_SOURCES),--raw $(s)) --out $(OUT) $(if $(filter 1 true yes,$(OVERWRITE)),--overwrite,)
 
 # Sync incrémentale: télécharge les matchs récents manquants et append dans data/processed
 # Usage: make update [OUT=data/processed] [RAW_UPDATES=data/raw/updates] [LIMIT=100] [MAX_PAGES=3] [SINCE=YYYY-MM-DD]
@@ -68,8 +72,21 @@ prune: install
 
 # Pré-calcul des métriques (Elo, firsts) à partir des parquets
 METRICS_OUT ?= data/metrics
+GLICKO_CONFIG ?=
 precompute: install
-	PYTHONPATH=. $(PYTHON) scripts/precompute_metrics.py --processed $(OUT) --teams data/teams_to_look.csv --out $(METRICS_OUT)
+	PYTHONPATH=. $(PYTHON) scripts/precompute_metrics.py --processed $(OUT) --teams data/teams_to_look.csv --out $(METRICS_OUT) $(if $(GLICKO_CONFIG),--glicko-config $(GLICKO_CONFIG),)
+
+# Grid-search Glicko-2 hyperparameters (series-based) and write best config JSON.
+# Usage: make calibrate-glicko OUT=data/processed METRICS_OUT=data/metrics
+CAL_G2_SCOPE ?= tracked_v_any
+CAL_G2_WARMUP ?= 0.2
+CAL_G2_PERIODS ?= day week
+CAL_G2_TAUS ?= 0.3 0.5 0.8
+CAL_G2_INIT_RDS ?= 300 350
+CAL_G2_INIT_SIGMAS ?= 0.06
+CAL_G2_SCORE_RD_MULTS ?= 2.0
+calibrate-glicko: install
+	PYTHONPATH=. $(PYTHON) scripts/calibrate_glicko2.py --processed $(OUT) --teams data/teams_to_look.csv --out $(METRICS_OUT)/glicko2_calibration.json --scope $(CAL_G2_SCOPE) --warmup-frac $(CAL_G2_WARMUP) --periods $(CAL_G2_PERIODS) --taus $(CAL_G2_TAUS) --init-rds $(CAL_G2_INIT_RDS) --init-sigmas $(CAL_G2_INIT_SIGMAS) --score-rd-mults $(CAL_G2_SCORE_RD_MULTS)
 
 # Sync processed + metrics to/from a VPS (rsync over SSH).
 # Requires: rsync + ssh, and DOTA_DATA_REMOTE=user@host:/abs/path (in env or .env).
