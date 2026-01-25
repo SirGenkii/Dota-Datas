@@ -124,3 +124,29 @@ precompute-upload: precompute sync-upload
 .PHONY: dashboard
 dashboard: install
 	$(PYTHON) scripts/run_dashboard.py
+
+# Docker (web-migration / future stack)
+DOCKER_COMPOSE ?= docker compose
+DOCKER_COMPOSE_FILE ?= docker-compose.yml
+
+.PHONY: docker-up docker-down docker-restart docker-rebuild docker-build docker-ps docker-logs
+docker-up:
+	$(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) up -d --remove-orphans
+
+docker-down:
+	$(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) down --remove-orphans
+
+docker-restart:
+	$(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) restart
+
+docker-build:
+	$(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) build
+
+docker-rebuild:
+	$(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) build --no-cache --pull
+
+docker-ps:
+	$(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) ps
+
+docker-logs:
+	$(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) logs -f --tail=200
