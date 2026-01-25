@@ -24,6 +24,12 @@
    python -m pip install --upgrade pip
    pip install -r requirements.txt
    ```
+   Optional (if you want to use the Makefile for venv creation): the Makefile supports Windows venv paths (`.venv\Scripts\python.exe`), so you can also run:
+   ```powershell
+   make install
+   # If your Python is only available via the launcher:
+   make venv SYSTEM_PYTHON="py -3.12"
+   ```
 5) Copy `.env.example` to `.env` (add `OPENDOTA_KEY`).
 
 ### Windows — Run the dashboard
