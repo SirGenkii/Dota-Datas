@@ -18,6 +18,37 @@ from dotenv import load_dotenv
 
 MANIFEST_NAME = "manifest.json"
 
+def _tmp_base_dir(project_root: Path) -> Optional[Path]:
+    """
+    Choose a short base directory for temp files.
+
+    This matters for OpenSSH ControlPath: AF_UNIX socket paths have a small max length.
+    On Windows/WSL the default temp dir can be very long and cause:
+      "unix path too long for unix domain socket"
+    """
+    forced = (os.getenv("DOTA_DATA_TMPDIR") or "").strip()
+    if forced:
+        p = _resolve_path(project_root, forced)
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    try:
+        sys_tmp = Path(tempfile.gettempdir())
+        if len(str(sys_tmp)) <= 40:
+            return sys_tmp
+    except Exception:
+        sys_tmp = None
+
+    # Prefer /tmp when available (WSL/Git Bash/Linux).
+    p_tmp = Path("/tmp")
+    if p_tmp.exists():
+        return p_tmp
+
+    # Fallback: project-local temp (may still be long, but better than nothing).
+    p = (project_root / ".tmp").resolve()
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
 
 def _is_ssh_remote(remote: str) -> bool:
     # Heuristic for rsync/ssh remote syntax: [user@]host:/abs/path
@@ -399,7 +430,8 @@ def main() -> None:
     if remote.is_ssh:
         _ensure_ssh_available()
 
-    with tempfile.TemporaryDirectory(prefix="dota-datas-ssh-") as td:
+    tmp_base = _tmp_base_dir(project_root)
+    with tempfile.TemporaryDirectory(prefix="ddssh-", dir=str(tmp_base) if tmp_base else None) as td:
         ssh_opts, ssh_password, use_sshpass = _build_ssh_opts(project_root, Path(td))
         rsh = _rsh_cmd(ssh_opts, use_sshpass=use_sshpass)
 

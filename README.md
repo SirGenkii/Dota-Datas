@@ -43,6 +43,12 @@
    ```
    (equivalent without make: `python -m streamlit run app/dashboard_streamlit.py`)
 
+Troubleshooting:
+- If you get `unix path too long for unix domain socket`, your temp directory path is too long. Fix by either:
+  - moving the repo to a shorter path (e.g. `C:\dev\dota-datas`), and/or
+  - setting `DOTA_DATA_TMPDIR` in `.env` to a short directory like `C:\Temp` (create it if needed).
+  This can also affect `make sync-upload` / `make sync-download` because SSH control sockets use the temp directory for their paths.
+
 ### Linux/macOS
 1) Install Python 3.12.3 and make (e.g., `sudo apt install python3 python3-venv make` then ensure version 3.12.3).
 2) Create venv & install deps:

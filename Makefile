@@ -25,7 +25,7 @@ export PYTHONPATH := .
 
 venv:
 	$(SYSTEM_PYTHON) -m venv $(VENV)
-	$(PYTHON) -m pip install --upgrade pip >/dev/null
+	$(PYTHON) -m pip install --upgrade pip
 
 install: venv
 	@$(PYTHON) -m pip install -q -r requirements.txt && echo "Dependencies up to date."
@@ -123,4 +123,4 @@ precompute-upload: precompute sync-upload
 
 .PHONY: dashboard
 dashboard: install
-	$(PYTHON) -m streamlit run app/dashboard_streamlit.py
+	$(PYTHON) scripts/run_dashboard.py
