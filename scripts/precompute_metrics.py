@@ -865,8 +865,11 @@ def compute_series_maps(matches: pl.DataFrame, tracked_ids: List[int]) -> Tuple[
         if max(win_count.values()) < needed:
             # Incomplete series (no one reached required wins)
             continue
-        if win_count[team_list[0]] == win_count[team_list[1]]:
-            # Drawn series -> disregard for BO stats
+
+        # BO2 is special: a complete BO2 should have exactly 2 maps.
+        # Draws (1-1) are valid and should be INCLUDED for map-level stats.
+        if bo_val == 2 and df_sorted.height != 2:
+            # Likely incomplete / bad grouping for BO2
             continue
 
         # Persist ordered maps

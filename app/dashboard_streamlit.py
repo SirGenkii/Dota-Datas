@@ -941,21 +941,28 @@ def series_winner_map_share(
     rank_min: int,
     rank_max: int,
     require_both_in_range: bool,
-) -> List[Dict[str, Any]]:
-    """For a given BO type, compute how often the series winner wins map 1, 2, ... within a rank window."""
+) -> Dict[str, Any]:
+    """
+    For a given BO type, compute how often the series winner wins map 1, 2, ... within a rank window.
+
+    Notes:
+    - For BO2, drawn series (1-1) have no winner; by default we compute the share on DECISIVE series only
+      (i.e., excluding draws) to keep the metric meaningful.
+    """
     if matches is None or matches.is_empty() or elo_latest is None or elo_latest.is_empty():
-        return []
+        return {"rows": [], "series_total": 0, "series_draws": 0, "series_decisive": 0}
     bo_col = "bo_type" if "bo_type" in matches.columns else "series_type"
     needed_cols = {"series_id", "leagueid", bo_col, "radiant_team_id", "dire_team_id", "radiant_win", "start_time"}
     if not needed_cols.issubset(matches.columns):
-        return []
+        return {"rows": [], "series_total": 0, "series_draws": 0, "series_decisive": 0}
     rank_col, rank_map = _rank_map(elo_latest)
     if rank_col is None or not rank_map:
-        return []
+        return {"rows": [], "series_total": 0, "series_draws": 0, "series_decisive": 0}
     max_maps_for_bo = {1: 1, 2: 2, 3: 3, 5: 5}
     max_maps = max_maps_for_bo.get(bo_type)
     required_wins = {1: 1, 2: 1, 3: 2, 5: 3}
     share: Dict[int, Dict[str, float]] = {}
+    series_total = series_draws = series_decisive = 0
     series_df = matches.filter(pl.col(bo_col) == bo_type)
     for df in series_df.partition_by(["series_id", "leagueid"], as_dict=False, maintain_order=True):
         if df.is_empty():
@@ -985,6 +992,7 @@ def series_winner_map_share(
             if not any(in_range_flags):
                 continue
 
+        series_total += 1
         win_count: Dict[int, int] = {teams[0]: 0, teams[1]: 0}
         for r in rows:
             rid = int(r.get("radiant_team_id"))
@@ -997,6 +1005,14 @@ def series_winner_map_share(
             continue  # skip undecided / incomplete series for this BO
         if win_count[teams[0]] != win_count[teams[1]]:
             series_winner = teams[0] if win_count[teams[0]] > win_count[teams[1]] else teams[1]
+            series_decisive += 1
+        else:
+            series_draws += 1
+
+        # For BO2 (and any format where draws exist), the concept of "series winner" does not apply to draws.
+        # To keep this metric interpretable, skip drawn series entirely.
+        if series_winner is None:
+            continue
 
         for idx, r in enumerate(rows, start=1):
             rid = int(r.get("radiant_team_id"))
@@ -1004,7 +1020,7 @@ def series_winner_map_share(
             map_winner = rid if r.get("radiant_win") else did
             entry = share.setdefault(idx, {"maps": 0, "won_by_series_winner": 0})
             entry["maps"] += 1
-            if series_winner is not None and map_winner == series_winner:
+            if map_winner == series_winner:
                 entry["won_by_series_winner"] += 1
 
     out: List[Dict[str, Any]] = []
@@ -1015,7 +1031,7 @@ def series_winner_map_share(
             continue
         pct = data["won_by_series_winner"] / maps if maps else None
         out.append({"map_num": map_num, "win_pct": pct, "maps": maps})
-    return out
+    return {"rows": out, "series_total": series_total, "series_draws": series_draws, "series_decisive": series_decisive}
 
 
 def series_score_distribution(
@@ -1873,7 +1889,7 @@ def team_block(
             )
             inv_bo = {v: k for k, v in bo_map.items()}
             bo_choice_code = inv_bo.get(bo_choice_label, 3)
-            shares = series_winner_map_share(
+            shares_info = series_winner_map_share(
                 matches_raw,
                 elo_latest,
                 bo_type=bo_choice_code,
@@ -1881,6 +1897,7 @@ def team_block(
                 rank_max=rank_range_series[1],
                 require_both_in_range=not include_outside_series,
             )
+            shares = shares_info.get("rows") or []
             score_dist = series_score_distribution(
                 matches_raw,
                 elo_latest,
@@ -1891,7 +1908,14 @@ def team_block(
             )
             total_maps = sum(r["maps"] for r in shares) if shares else 0
             total_series = int(sum(d.get("series", 0) for d in score_dist)) if score_dist else 0
-            st.caption(f"Ranks [{rank_range_series[0]}, {rank_range_series[1]}] — {int(total_maps)} maps | {total_series} series")
+            series_total = int(shares_info.get("series_total") or 0)
+            series_draws = int(shares_info.get("series_draws") or 0)
+            series_decisive = int(shares_info.get("series_decisive") or 0)
+            st.caption(
+                f"Ranks [{rank_range_series[0]}, {rank_range_series[1]}] — "
+                f"{total_series} series (draws: {series_draws}, decisive: {series_decisive}) | "
+                f"{int(total_maps)} maps (decisive-series only)"
+            )
             if not shares:
                 st.info("No series data in this rank window for the selected BO type.")
             else:
@@ -1899,8 +1923,17 @@ def team_block(
                 df_share["Series winner win %"] = df_share["win_pct"].apply(lambda v: f"{v*100:.1f}%" if pd.notnull(v) else "N/A")
                 if score_dist:
                     df_score = pd.DataFrame(score_dist)
+                    if bo_choice_code == 2 and "score" in df_score.columns:
+                        df_score = df_score.copy()
+                        df_score["score"] = df_score["score"].replace({"1-1": "1-1 (draw)", "2-0": "2-0 (sweep)"})
                     df_score["Share"] = df_score["share"].apply(lambda v: f"{v*100:.1f}%" if pd.notnull(v) else "N/A")
                     st.dataframe(df_score[["score", "Share", "series"]].rename(columns={"score": "Series score"}), use_container_width=True)
+                if bo_choice_code == 2:
+                    st.info(
+                        "BO2 series can end as a draw (1-1). "
+                        "This chart is computed on decisive series only (i.e., excluding draws), "
+                        "so Map 1/2 will typically be 100%."
+                    )
                 chart_share = (
                     alt.Chart(df_share.assign(map_label=df_share["map_num"].apply(lambda m: f"Map {int(m)}")))
                     .mark_bar()
