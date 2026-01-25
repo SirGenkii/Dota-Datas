@@ -242,6 +242,58 @@ streamlit run app/dashboard_streamlit.py
 - Precompute metrics: `make precompute`
 - Run Streamlit: `streamlit run app/dashboard_streamlit.py`
 
+## Web stack (FastAPI + Postgres + Redis/RQ) — local Docker
+This is the start of the migration away from Streamlit/parquet artifacts toward a DB-backed web app.
+
+### Start services
+```bash
+make docker-up
+```
+Services:
+- Postgres: `localhost:5432`
+- Redis: `localhost:6379`
+- API: `localhost:8000`
+
+### Initialize DB (reset + migrate) and bootstrap from existing data
+```bash
+docker compose exec api python -m src.dota_data.web.cli db-reset
+docker compose exec api python -m src.dota_data.web.cli bootstrap --processed data/processed
+# Optional (fast smoke test): skip the biggest tables
+# docker compose exec api python -m src.dota_data.web.cli bootstrap --processed data/processed --skip-big
+```
+
+### (Optional) If you want to scrape from OpenDota without bootstrapping parquets
+Seed the tracked teams + aliases from CSVs:
+```bash
+docker compose exec api python -m src.dota_data.web.cli import-teams
+```
+
+### Create the first admin user (admin-only workflow for now)
+```bash
+docker compose exec api python -m src.dota_data.web.cli create-user --username admin --password "change-me" --admin
+```
+
+### Get a JWT and call the API
+```bash
+curl -s -X POST "http://localhost:8000/auth/token" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "username=admin&password=change-me"
+```
+Then use `Authorization: Bearer <token>` on protected endpoints (ex: `GET /teams`).
+
+### Trigger a scrape job (incremental, skips existing match_ids)
+```bash
+TOKEN=$(curl -s -X POST "http://localhost:8000/auth/token" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "username=admin&password=change-me" \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])')
+
+curl -s -X POST "http://localhost:8000/jobs/scrape" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"payload":{"team_ids":[2163],"max_pages":1,"limit":5,"max_new":2}}'
+```
+
 ## Notes
 - Ensure `OPENDOTA_KEY` is set in `.env` for scraping.
 - Precompute uses `data/processed/extras.parquet` when present (otherwise it falls back to `--raw`).

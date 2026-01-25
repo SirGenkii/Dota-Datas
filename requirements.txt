@@ -15,3 +15,15 @@ streamlit
 requests
 plotly
 ijson
+
+# Web migration (FastAPI + DB + jobs)
+fastapi
+uvicorn[standard]
+sqlalchemy
+alembic
+psycopg[binary]
+redis
+rq
+bcrypt
+python-jose[cryptography]
+python-multipart

@@ -150,3 +150,21 @@ docker-ps:
 
 docker-logs:
 	$(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) logs -f --tail=200
+
+# Web stack (FastAPI + Postgres + RQ) — local CLI helpers
+.PHONY: web-migrate web-db-reset web-create-user web-bootstrap
+WEB_USERNAME ?=
+WEB_PASSWORD ?=
+WEB_ADMIN ?= 0
+WEB_BATCH_SIZE ?= 10000
+web-migrate: install
+	$(PYTHON) -m src.dota_data.web.cli migrate
+
+web-db-reset: install
+	$(PYTHON) -m src.dota_data.web.cli db-reset
+
+web-create-user: install
+	$(PYTHON) -m src.dota_data.web.cli create-user --username $(WEB_USERNAME) --password $(WEB_PASSWORD) $(if $(filter 1 true yes,$(WEB_ADMIN)),--admin,)
+
+web-bootstrap: install
+	$(PYTHON) -m src.dota_data.web.cli bootstrap --processed $(OUT) --teams-csv data/teams_to_look.csv --aliases-csv $(ALIASES) $(if $(filter 1 true yes,$(RESET)),--reset,) --batch-size $(WEB_BATCH_SIZE)

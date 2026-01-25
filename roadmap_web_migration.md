@@ -5,6 +5,24 @@ Passer d’un projet “fichiers + Streamlit” à une **application web Docker*
 
 ---
 
+## Choix validés (MVP) — à ne pas rediscuter
+- **Queue** : Redis + **RQ** (worker Python séparé).
+- **DB reset** : via **CLI** (sans toucher aux volumes Docker) :
+  - `DROP SCHEMA public CASCADE; CREATE SCHEMA public;` (et recréer extensions si besoin).
+- **Bootstrap initial** : via **CLI “bootstrap”** qui peut reset la DB puis **ingère depuis les fichiers existants** :
+  - `data/processed/*.parquet` (inclut `matches`, `players`, `objectives`, `teamfights`, etc.)
+  - `data/processed/extras.parquet` (adv arrays + picks/bans)
+  - `data/teams_to_look.csv` + `data/team_aliases.csv` (ou équivalent) pour `teams` / `team_aliases`
+  - **On ne bootstrape pas `data/metrics/*.parquet`** : on recalculera les premières métriques via l’UI (jobs) pour valider le fonctionnement end-to-end.
+- **Ingestion “future”** : l’update se fait via le **bouton UI** (jobs scrape/precompute) et **ne repasse plus par les fichiers**.
+- **Raw OpenDota** : on stocke la réponse brute `GET /matches/{id}` en DB (table `match_raw`) pour pouvoir re-parser sans rescraper.
+- **Nommage DB v1** : on garde les noms “compat parquet/OpenDota” quand c’est utile (ex: `leagueid`) pour simplifier le mapping 1:1.
+- **Auth** : **multi-user en DB** dès le MVP.
+  - création des users : **admin-only** au début (CLI / endpoints admin), pas d’inscription ouverte.
+  - auth web/API : **JWT Bearer**.
+- **Doc** : l’avancement + checklist restent dans ce fichier (`roadmap_web_migration.md`).
+  - Le `README.md` contiendra les **commandes et infos utiles** pour lancer Docker en local et préparer un futur déploiement serveur.
+
 ## Pourquoi c’est intéressant (bénéfices)
 - **Partage / collaboration** : plus besoin de déplacer des parquets, tout le monde lit la même source (DB).
 - **Reproductibilité** : chaque run de scraping/precompute est **versionné** (`run_id`, timestamp, config).
@@ -365,6 +383,11 @@ Livrables :
 - `docker-compose.yml` (pg + redis optionnel)
 - migrations Alembic v1
 
+Avancement :
+- [x] Choix queue : **Redis + RQ**
+- [x] `docker-compose.yml` : Postgres + Redis + services `api`/`worker` (backend)
+- [x] Migrations : Alembic + révision `0001_init_web_stack` (tables MVP : users, jobs, runs, teams, aliases, processed tables)
+
 ### Phase 1 — Ingestion minimale (3–7 jours)
 - importer `teams_to_look.csv` + aliases → `teams`, `team_aliases`
 - job “discover + fetch match details”
@@ -375,6 +398,18 @@ Livrables :
 - `POST /jobs/scrape`
 - `GET /runs`, `GET /jobs/{id}`
 - logs job consultables
+
+Avancement :
+- [x] Bootstrap “fichiers → DB” (CLI) : ingère `data/processed/*.parquet` + `teams_to_look.csv` + `team_aliases.csv`
+- [x] Auth JWT Bearer + table `users` + création admin-only (CLI)
+- [x] API jobs : `POST /jobs/scrape` + `POST /jobs/precompute` + `GET /jobs/{id}` (+ logs + result)
+- [x] Table `match_raw` (OpenDota raw JSON) + migration
+- [x] Job scrape (OpenDota → DB) :
+  - incremental strict via `since_start_time` (par défaut = dernier `matches.start_time` en DB)
+  - skip strict des `match_id` déjà présents en DB
+  - persist raw JSON en `match_raw` + parse vers `matches/series/players/objectives/teamfights/extras`
+  - run tracking (`runs`) + appels HTTP (`fetch_events`)
+- [ ] Implémenter le vrai job precompute (Glicko-2, etc.) en DB
 
 ### Phase 2 — Precompute Glicko-2 en DB (3–7 jours)
 - builder series outcomes depuis `series`

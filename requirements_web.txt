@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+alembic
+psycopg[binary]
+redis
+rq
+bcrypt
+python-jose[cryptography]
+python-multipart
+python-dotenv
+polars
+pyarrow
+pandas
+requests
